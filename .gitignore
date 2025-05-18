@@ -2,3 +2,5 @@ back-end/data
 myvenv
 __pycache__
 cache
+/back-end
+/Frontend_Backups
