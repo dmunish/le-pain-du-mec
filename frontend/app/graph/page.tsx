@@ -13,8 +13,9 @@ import { Slider as SliderPrimitive } from "@/components/ui/slider"
 
 interface Node {
   id: number
-  status: "susceptible" | "infected" | "recovered" | "deceased"
+  status: "infected" | "recovered" | "deceased"
   day: number
+  connections: number
   x?: number
   y?: number
   fx?: number | null
@@ -27,7 +28,7 @@ interface Link {
   source: number | Node
   target: number | Node
   day: number
-  value: number
+  id: string // Unique identifier for the link
 }
 
 export default function ForceDirectedGraph() {
@@ -42,239 +43,208 @@ export default function ForceDirectedGraph() {
   const simulationRef = useRef<d3.Simulation<Node, Link> | null>(null)
   const nodesRef = useRef<Node[]>([])
   const linksRef = useRef<Link[]>([])
+  const prevNodesRef = useRef<Map<number, Node>>(new Map())
   const isInitializedRef = useRef<boolean>(false)
   const graphInitializedRef = useRef<boolean>(false)
 
   // Stats
   const [stats, setStats] = useState({
     totalNodes: 0,
-    susceptibleNodes: 0,
     infectedNodes: 0,
     recoveredNodes: 0,
     deceasedNodes: 0,
-    totalLinks: 0,
-    r0: 0,
+    totalTransmissions: 0,
+    maxConnections: 0,
+    avgConnections: 0,
   })
 
   // Generate data for a specific day - memoized to prevent regeneration on every render
-  const generateDataForDay = useCallback((day: number) => {
-    // If we already have data, just update it for the current day
-    if (nodesRef.current.length > 0) {
-      // Simulate disease spread up to the current day
-      if (day > 1) {
-        const nodes = [...nodesRef.current]
-        const links = [
-          ...linksRef.current.filter((link) => {
-            const linkDay = typeof link.day === "number" ? link.day : 1
-            return linkDay < day
-          }),
-        ]
+  const generateDataForDay = useCallback(
+    (day: number) => {
+      // Create a map to track connections for each node
+      const connectionCount = new Map<number, number>()
 
-        // Find infected nodes
-        const infectedIndices = nodes
-          .map((node, index) => (node.status === "infected" ? index : -1))
-          .filter((index) => index !== -1)
+      // If we have simulation data, use it
+      if (simulation && simulation.currentTimeStep) {
+        const timeStep = simulation.currentTimeStep
 
-        // Each infected node can infect connected susceptible nodes
-        for (const infectedIndex of infectedIndices) {
-          // Find connections to this infected node
-          const connections = links
-            .filter((link) => {
-              const sourceId = typeof link.source === "number" ? link.source : link.source.id
-              const targetId = typeof link.target === "number" ? link.target : link.target.id
-              return sourceId === infectedIndex || targetId === infectedIndex
-            })
-            .map((link) => {
-              const sourceId = typeof link.source === "number" ? link.source : link.source.id
-              const targetId = typeof link.target === "number" ? link.target : link.target.id
-              return sourceId === infectedIndex ? targetId : sourceId
-            })
+        // Get all agents who were infected at some point (currently infected, recovered, or deceased)
+        const infectedAgents = timeStep.agents.filter(
+          (agent) => agent.status === "infected" || agent.status === "recovered" || agent.status === "deceased",
+        )
 
-          // Try to infect connected susceptible nodes with consistent probability
-          for (const connectedIndex of connections) {
-            if (nodes[connectedIndex].status === "susceptible") {
-              // Use a deterministic approach based on node IDs and day for consistency
-              const infectionSeed = (connectedIndex * 13 + day * 7) % 100
-              if (infectionSeed < 30) {
-                // 30% chance
-                nodes[connectedIndex].status = "infected"
-                nodes[connectedIndex].day = day
+        // Create nodes for infected agents
+        const nodes: Node[] = infectedAgents.map((agent) => {
+          // Check if we have previous position data for this node
+          const prevNode = prevNodesRef.current.get(agent.id)
 
-                // Add a new infection link
-                links.push({
-                  source: infectedIndex,
-                  target: connectedIndex,
-                  day: day,
-                  value: 2,
-                })
-              }
-            }
+          return {
+            id: agent.id,
+            status: agent.status as "infected" | "recovered" | "deceased",
+            day: agent.infectedDay || 1,
+            connections: 0, // Will be updated after processing links
+            // Preserve position if it existed before
+            x: prevNode?.x,
+            y: prevNode?.y,
+            vx: prevNode?.vx,
+            vy: prevNode?.vy,
           }
-
-          // Infected nodes can recover or die with consistent probability
-          if (nodes[infectedIndex].status === "infected") {
-            const recoverySeed = (infectedIndex * 11 + day * 5) % 100
-            if (recoverySeed < 10) {
-              // 10% chance
-              const fatalitySeed = (infectedIndex * 7 + day * 3) % 100
-              nodes[infectedIndex].status = fatalitySeed < 10 ? "deceased" : "recovered" // 10% fatality rate among recoveries
-            }
-          }
-        }
-
-        // Filter links to only show those up to the current day
-        const visibleLinks = links.filter((link) => {
-          const linkDay = typeof link.day === "number" ? link.day : 1
-          return linkDay <= day
         })
 
-        return { nodes, visibleLinks }
-      }
+        // Create links for transmission events up to the current day
+        const links: Link[] = []
 
-      return {
-        nodes: nodesRef.current,
-        visibleLinks: linksRef.current.filter((link) => {
-          const linkDay = typeof link.day === "number" ? link.day : 1
-          return linkDay <= day
-        }),
-      }
-    }
+        // Process infection chains to create links
+        timeStep.transmissionEvents.forEach((event) => {
+          if (event.day <= day && event.source !== null && event.target !== null) {
+            // Only add links if both source and target were infected
+            const sourceAgent = infectedAgents.find((a) => a.id === event.source)
+            const targetAgent = infectedAgents.find((a) => a.id === event.target)
 
-    // Initial data generation with consistent seed
-    const nodes: Node[] = []
-    const links: Link[] = []
+            if (sourceAgent && targetAgent) {
+              links.push({
+                source: event.source,
+                target: event.target,
+                day: event.day,
+                id: `${event.source}-${event.target}`, // Unique ID for the link
+              })
 
-    // Initial infected nodes
-    const initialInfected = 5
-    for (let i = 0; i < initialInfected; i++) {
-      nodes.push({
-        id: i,
-        status: "infected",
-        day: 1,
-      })
-    }
-
-    // Initial susceptible nodes
-    const totalNodes = 50
-    for (let i = initialInfected; i < totalNodes; i++) {
-      nodes.push({
-        id: i,
-        status: "susceptible",
-        day: 1,
-      })
-    }
-
-    // Create initial connections with consistent pattern
-    for (let i = 0; i < nodes.length; i++) {
-      const numConnections = Math.floor((i % 3) + 1) // Consistent pattern based on node ID
-      for (let j = 0; j < numConnections; j++) {
-        const targetIndex = (i + j * 7) % nodes.length // Consistent pattern for connections
-        if (targetIndex !== i) {
-          links.push({
-            source: i,
-            target: targetIndex,
-            day: 1,
-            value: 1,
-          })
-        }
-      }
-    }
-
-    // Simulate disease spread up to the current day with consistent probabilities
-    if (day > 1) {
-      for (let d = 2; d <= day; d++) {
-        // Find infected nodes
-        const infectedIndices = nodes
-          .map((node, index) => (node.status === "infected" ? index : -1))
-          .filter((index) => index !== -1)
-
-        // Each infected node can infect connected susceptible nodes
-        for (const infectedIndex of infectedIndices) {
-          // Find connections to this infected node
-          const connections = links
-            .filter((link) => {
-              const sourceId = typeof link.source === "number" ? link.source : link.source.id
-              const targetId = typeof link.target === "number" ? link.target : link.target.id
-              return sourceId === infectedIndex || targetId === infectedIndex
-            })
-            .map((link) => {
-              const sourceId = typeof link.source === "number" ? link.source : link.source.id
-              const targetId = typeof link.target === "number" ? link.target : link.target.id
-              return sourceId === infectedIndex ? targetId : sourceId
-            })
-
-          // Try to infect connected susceptible nodes with consistent probability
-          for (const connectedIndex of connections) {
-            if (nodes[connectedIndex].status === "susceptible") {
-              // Use a deterministic approach based on node IDs and day for consistency
-              const infectionSeed = (connectedIndex * 13 + d * 7) % 100
-              if (infectionSeed < 30) {
-                // 30% chance
-                nodes[connectedIndex].status = "infected"
-                nodes[connectedIndex].day = d
-
-                // Add a new infection link
-                links.push({
-                  source: infectedIndex,
-                  target: connectedIndex,
-                  day: d,
-                  value: 2,
-                })
-              }
+              // Increment connection count for both nodes
+              connectionCount.set(event.source, (connectionCount.get(event.source) || 0) + 1)
+              connectionCount.set(event.target, (connectionCount.get(event.target) || 0) + 1)
             }
           }
+        })
 
-          // Infected nodes can recover or die with consistent probability
-          if (nodes[infectedIndex].status === "infected") {
-            const recoverySeed = (infectedIndex * 11 + d * 5) % 100
-            if (recoverySeed < 10) {
-              // 10% chance
-              const fatalitySeed = (infectedIndex * 7 + d * 3) % 100
-              nodes[infectedIndex].status = fatalitySeed < 10 ? "deceased" : "recovered" // 10% fatality rate among recoveries
-            }
+        // Update connection counts for each node
+        nodes.forEach((node) => {
+          node.connections = connectionCount.get(node.id) || 0
+        })
+
+        // Calculate stats
+        const maxConnections = Math.max(...Array.from(connectionCount.values()), 0)
+        const avgConnections =
+          connectionCount.size > 0
+            ? Array.from(connectionCount.values()).reduce((sum, count) => sum + count, 0) / connectionCount.size
+            : 0
+
+        setStats({
+          totalNodes: nodes.length,
+          infectedNodes: nodes.filter((n) => n.status === "infected").length,
+          recoveredNodes: nodes.filter((n) => n.status === "recovered").length,
+          deceasedNodes: nodes.filter((n) => n.status === "deceased").length,
+          totalTransmissions: links.length,
+          maxConnections,
+          avgConnections: Number.parseFloat(avgConnections.toFixed(2)),
+        })
+
+        // Update the previous nodes map for position tracking
+        const newNodesMap = new Map<number, Node>()
+        nodes.forEach((node) => {
+          newNodesMap.set(node.id, node)
+        })
+        prevNodesRef.current = newNodesMap
+
+        // Store the full data for future reference
+        nodesRef.current = nodes
+        linksRef.current = links
+
+        return { nodes, links }
+      }
+
+      // If no simulation data, generate mock data for development
+      // This is a fallback for when the backend isn't connected
+      const mockNodes: Node[] = []
+      const mockLinks: Link[] = []
+
+      // Generate mock infected nodes
+      const totalInfected = Math.min(5 + day * 2, 50) // Grow with day
+
+      for (let i = 0; i < totalInfected; i++) {
+        // Determine status based on id and day
+        let status: "infected" | "recovered" | "deceased" = "infected"
+        if (i < day / 3) {
+          status = Math.random() > 0.8 ? "deceased" : "recovered"
+        }
+
+        // Check if we have previous position data for this node
+        const prevNode = prevNodesRef.current.get(i)
+
+        mockNodes.push({
+          id: i,
+          status,
+          day: Math.min(i + 1, day),
+          connections: 0, // Will be updated
+          // Preserve position if it existed before
+          x: prevNode?.x,
+          y: prevNode?.y,
+          vx: prevNode?.vx,
+          vy: prevNode?.vy,
+        })
+      }
+
+      // Generate mock transmission links
+      for (let i = 0; i < totalInfected - 1; i++) {
+        // Each node infects 1-3 others
+        const numInfections = Math.floor(Math.random() * 3) + 1
+
+        for (let j = 0; j < numInfections; j++) {
+          const target = i + j + 1
+          if (target < totalInfected) {
+            mockLinks.push({
+              source: i,
+              target,
+              day: Math.min(i + 2, day),
+              id: `${i}-${target}`,
+            })
+
+            // Update connection counts
+            mockNodes[i].connections++
+            mockNodes[target].connections++
           }
         }
       }
-    }
 
-    // Filter links to only show those up to the current day
-    const visibleLinks = links.filter((link) => {
-      const linkDay = typeof link.day === "number" ? link.day : 1
-      return linkDay <= day
-    })
+      // Calculate mock stats
+      const maxConnections = Math.max(...mockNodes.map((n) => n.connections), 0)
+      const avgConnections =
+        mockNodes.length > 0 ? mockNodes.reduce((sum, n) => sum + n.connections, 0) / mockNodes.length : 0
 
-    // Store the full data for future reference
-    nodesRef.current = nodes
-    linksRef.current = links
+      setStats({
+        totalNodes: mockNodes.length,
+        infectedNodes: mockNodes.filter((n) => n.status === "infected").length,
+        recoveredNodes: mockNodes.filter((n) => n.status === "recovered").length,
+        deceasedNodes: mockNodes.filter((n) => n.status === "deceased").length,
+        totalTransmissions: mockLinks.length,
+        maxConnections,
+        avgConnections: Number.parseFloat(avgConnections.toFixed(2)),
+      })
 
-    return { nodes, visibleLinks }
-  }, [])
+      // Update the previous nodes map for position tracking
+      const newNodesMap = new Map<number, Node>()
+      mockNodes.forEach((node) => {
+        newNodesMap.set(node.id, node)
+      })
+      prevNodesRef.current = newNodesMap
 
-  // Render the graph
+      // Store the full data for future reference
+      nodesRef.current = mockNodes
+      linksRef.current = mockLinks
+
+      return { nodes: mockNodes, links: mockLinks }
+    },
+    [simulation],
+  )
+
+  // Initialize the graph
   useEffect(() => {
     // Check if simulation is active before proceeding
-    if (!svgRef.current || !isSimulationActive() || graphInitializedRef.current) return
+    if (!svgRef.current || !isSimulationActive()) return
 
     // Generate data for the current day
-    const { nodes, visibleLinks } = generateDataForDay(currentDay)
+    const { nodes, links } = generateDataForDay(currentDay)
 
-    // Update stats
-    setStats({
-      totalNodes: nodes.length,
-      susceptibleNodes: nodes.filter((n) => n.status === "susceptible").length,
-      infectedNodes: nodes.filter((n) => n.status === "infected").length,
-      recoveredNodes: nodes.filter((n) => n.status === "recovered").length,
-      deceasedNodes: nodes.filter((n) => n.status === "deceased").length,
-      totalLinks: visibleLinks.length,
-      r0: Number.parseFloat(
-        (
-          visibleLinks.filter((l) => {
-            const linkDay = typeof l.day === "number" ? l.day : 1
-            return linkDay > 1
-          }).length / Math.max(1, nodes.filter((n) => n.status !== "susceptible").length)
-        ).toFixed(2),
-      ),
-    })
+    if (nodes.length === 0) return // Don't render if no data
 
     const width = svgRef.current.clientWidth
     const height = svgRef.current.clientHeight
@@ -286,6 +256,9 @@ export default function ForceDirectedGraph() {
       .attr("width", "100%")
       .attr("height", "100%")
       .attr("style", "max-width: 100%; height: auto; overflow: visible;")
+
+    // Clear any existing content
+    svg.selectAll("*").remove()
 
     // Add zoom behavior
     const zoom = d3
@@ -316,106 +289,66 @@ export default function ForceDirectedGraph() {
     feMerge.append("feMergeNode").attr("in", "coloredBlur")
     feMerge.append("feMergeNode").attr("in", "SourceGraphic")
 
-    // Create force simulation with higher alpha decay to stabilize faster
+    // Create force simulation
     const forceSimulation = d3
       .forceSimulation<Node>(nodes)
-      .force("charge", d3.forceManyBody().strength(-100))
+      .force("charge", d3.forceManyBody().strength(-120))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(10))
+      .force(
+        "collision",
+        d3.forceCollide().radius((d) => Math.sqrt(d.connections + 1) * 4 + 5),
+      )
       .force(
         "link",
         d3
-          .forceLink<Node, Link>(visibleLinks)
+          .forceLink<Node, Link>(links)
           .id((d) => d.id)
-          .distance(50),
+          .distance(70),
       )
-      .alphaDecay(0.1) // Higher alpha decay for faster stabilization
+      .alphaDecay(0.02) // Slower decay for smoother transitions
       .on("tick", ticked)
-      .on("end", () => {
-        // When simulation ends naturally, stop it completely
-        forceSimulation.stop()
-      })
 
     simulationRef.current = forceSimulation
 
-    // Create links
-    const link = g
-      .append("g")
-      .attr("class", "links")
-      .attr("stroke", "#4b607f")
-      .attr("stroke-opacity", 0.6)
-      .selectAll("line")
-      .data(visibleLinks)
-      .join("line")
-      .attr("stroke-width", (d) => Math.sqrt(typeof d.value === "number" ? d.value : 1))
+    // Create links group
+    const linkGroup = g.append("g").attr("class", "links")
 
-    // Create nodes
-    const node = g
-      .append("g")
-      .attr("class", "nodes")
-      .selectAll("circle")
-      .data(nodes)
-      .join("circle")
-      .attr("r", 8)
-      .attr("fill", (d) => {
-        switch (d.status) {
-          case "infected":
-            return "#F56E0F"
-          case "recovered":
-            return "#4b607f"
-          case "deceased":
-            return "#878787"
-          default:
-            return "#FFFFFF"
-        }
-      })
-      .attr("stroke", "#262626")
-      .attr("stroke-width", 1.5)
-      .style("filter", (d) => (d.status === "infected" ? "url(#glow)" : "none"))
-      .call(d3.drag<SVGCircleElement, Node>().on("start", dragstarted).on("drag", dragged).on("end", dragended) as any)
+    // Create nodes group
+    const nodeGroup = g.append("g").attr("class", "nodes")
 
-    // Add tooltips
-    node.append("title").text((d) => `Node ${d.id} (${d.status})`)
+    // Initial render of links
+    updateLinks(linkGroup, links)
+
+    // Initial render of nodes
+    updateNodes(nodeGroup, nodes)
 
     // Update positions on each tick
     function ticked() {
-      link
+      svg
+        .select(".links")
+        .selectAll("line")
         .attr("x1", (d) => {
-          const source = typeof d.source === "number" ? nodes[d.source] : d.source
-          return source.x!
+          const source = typeof d.source === "number" ? nodes.find((n) => n.id === d.source) : d.source
+          return source?.x || 0
         })
         .attr("y1", (d) => {
-          const source = typeof d.source === "number" ? nodes[d.source] : d.source
-          return source.y!
+          const source = typeof d.source === "number" ? nodes.find((n) => n.id === d.source) : d.source
+          return source?.y || 0
         })
         .attr("x2", (d) => {
-          const target = typeof d.target === "number" ? nodes[d.target] : d.target
-          return target.x!
+          const target = typeof d.target === "number" ? nodes.find((n) => n.id === d.target) : d.target
+          return target?.x || 0
         })
         .attr("y2", (d) => {
-          const target = typeof d.target === "number" ? nodes[d.target] : d.target
-          return target.y!
+          const target = typeof d.target === "number" ? nodes.find((n) => n.id === d.target) : d.target
+          return target?.y || 0
         })
 
-      node.attr("cx", (d) => d.x!).attr("cy", (d) => d.y!)
-    }
-
-    // Drag functions
-    function dragstarted(event: d3.D3DragEvent<SVGCircleElement, Node, Node>, d: Node) {
-      if (!event.active) forceSimulation.alphaTarget(0.3).restart()
-      d.fx = d.x
-      d.fy = d.y
-    }
-
-    function dragged(event: d3.D3DragEvent<SVGCircleElement, Node, Node>, d: Node) {
-      d.fx = event.x
-      d.fy = event.y
-    }
-
-    function dragended(event: d3.D3DragEvent<SVGCircleElement, Node, Node>, d: Node) {
-      if (!event.active) forceSimulation.alphaTarget(0)
-      d.fx = null
-      d.fy = null
+      svg
+        .select(".nodes")
+        .selectAll("circle")
+        .attr("cx", (d) => d.x || 0)
+        .attr("cy", (d) => d.y || 0)
     }
 
     // Set up zoom controls
@@ -445,11 +378,8 @@ export default function ForceDirectedGraph() {
     document.getElementById("zoom-out")?.addEventListener("click", zoomOut)
     document.getElementById("reset-zoom")?.addEventListener("click", resetZoom)
 
-    // Run the simulation for a fixed number of ticks and then stop it
-    forceSimulation.tick(300)
-    setTimeout(() => {
-      forceSimulation.stop()
-    }, 1000)
+    // Run the simulation for a fixed number of ticks to stabilize initial layout
+    forceSimulation.tick(100)
 
     graphInitializedRef.current = true
     isInitializedRef.current = true
@@ -465,80 +395,56 @@ export default function ForceDirectedGraph() {
     }
   }, [isSimulationActive, generateDataForDay, currentDay])
 
-  // Update the graph when the day changes
-  useEffect(() => {
-    if (!svgRef.current || !isSimulationActive() || !graphInitializedRef.current) return
-
-    // Generate data for the current day
-    const { nodes, visibleLinks } = generateDataForDay(currentDay)
-
-    // Update stats
-    setStats({
-      totalNodes: nodes.length,
-      susceptibleNodes: nodes.filter((n) => n.status === "susceptible").length,
-      infectedNodes: nodes.filter((n) => n.status === "infected").length,
-      recoveredNodes: nodes.filter((n) => n.status === "recovered").length,
-      deceasedNodes: nodes.filter((n) => n.status === "deceased").length,
-      totalLinks: visibleLinks.length,
-      r0: Number.parseFloat(
-        (
-          visibleLinks.filter((l) => {
-            const linkDay = typeof l.day === "number" ? l.day : 1
-            return linkDay > 1
-          }).length / Math.max(1, nodes.filter((n) => n.status !== "susceptible").length)
-        ).toFixed(2),
-      ),
-    })
-
-    // Update the visualization
-    const svg = d3.select(svgRef.current)
-
-    // Update links
-    svg
-      .select(".links")
+  // Function to update links with smooth transitions
+  const updateLinks = useCallback((selection, links) => {
+    selection
       .selectAll("line")
-      .data(visibleLinks)
+      .data(links, (d: Link) => d.id)
       .join(
+        // Enter new links with transition
         (enter) =>
           enter
             .append("line")
-            .attr("stroke-width", (d) => Math.sqrt(typeof d.value === "number" ? d.value : 1))
+            .attr("stroke", "#4b607f")
+            .attr("stroke-opacity", 0)
+            .attr("stroke-width", 1.5)
             .attr("x1", (d) => {
-              const source = typeof d.source === "number" ? nodes[d.source] : d.source
-              return source.x!
+              const source = typeof d.source === "number" ? nodesRef.current.find((n) => n.id === d.source) : d.source
+              return source?.x || 0
             })
             .attr("y1", (d) => {
-              const source = typeof d.source === "number" ? nodes[d.source] : d.source
-              return source.y!
+              const source = typeof d.source === "number" ? nodesRef.current.find((n) => n.id === d.source) : d.source
+              return source?.y || 0
             })
             .attr("x2", (d) => {
-              const target = typeof d.target === "number" ? nodes[d.target] : d.target
-              return target.x!
+              const target = typeof d.target === "number" ? nodesRef.current.find((n) => n.id === d.target) : d.target
+              return target?.x || 0
             })
             .attr("y2", (d) => {
-              const target = typeof d.target === "number" ? nodes[d.target] : d.target
-              return target.y!
-            }),
+              const target = typeof d.target === "number" ? nodesRef.current.find((n) => n.id === d.target) : d.target
+              return target?.y || 0
+            })
+            .call((enter) => enter.transition().duration(500).attr("stroke-opacity", 0.6)),
+        // Update existing links
         (update) => update,
-        (exit) => exit.remove(),
+        // Exit links with transition
+        (exit) => exit.transition().duration(500).attr("stroke-opacity", 0).remove(),
       )
+  }, [])
 
-    // Update nodes
-    svg
-      .select(".nodes")
+  // Function to update nodes with smooth transitions
+  const updateNodes = useCallback((selection, nodes) => {
+    selection
       .selectAll("circle")
-      .data(nodes)
+      .data(nodes, (d: Node) => d.id)
       .join(
-        (enter) =>
-          enter
+        // Enter new nodes with transition
+        (enter) => {
+          const enterSelection = enter
             .append("circle")
-            .attr("r", 8)
-            .attr("cx", (d) => d.x!)
-            .attr("cy", (d) => d.y!)
-            .attr("stroke", "#262626")
-            .attr("stroke-width", 1.5),
-        (update) =>
-          update
+            .attr("r", 0) // Start with radius 0
+            .attr("cx", (d) => d.x || 0)
+            .attr("cy", (d) => d.y || 0)
             .attr("fill", (d) => {
               switch (d.status) {
                 case "infected":
@@ -551,12 +457,117 @@ export default function ForceDirectedGraph() {
                   return "#FFFFFF"
               }
             })
-            .style("filter", (d) => (d.status === "infected" ? "url(#glow)" : "none")),
-        (exit) => exit.remove(),
-      )
+            .attr("stroke", "#262626")
+            .attr("stroke-width", 1.5)
+            .style("filter", (d) => (d.status === "infected" ? "url(#glow)" : "none"))
+            .style("opacity", 0) // Start transparent
 
-    // Do NOT restart the simulation - this prevents pulsating
-  }, [currentDay, isSimulationActive, generateDataForDay])
+          // Add tooltips
+          enterSelection.append("title").text((d) => `Agent ${d.id} (${d.status})\nConnections: ${d.connections}`)
+
+          // Add hover effects
+          enterSelection
+            .on("mouseover", function (event, d) {
+              // Highlight the node
+              d3.select(this).attr("stroke", "#F56E0F").attr("stroke-width", 3).style("filter", "url(#glow)")
+
+              // Highlight connected links and nodes
+              d3.selectAll("line").each(function (l: any) {
+                const source = typeof l.source === "number" ? l.source : l.source.id
+                const target = typeof l.target === "number" ? l.target : l.target.id
+
+                if (source === d.id || target === d.id) {
+                  d3.select(this).attr("stroke", "#F56E0F").attr("stroke-width", 3).attr("stroke-opacity", 1)
+
+                  // Highlight connected nodes
+                  d3.selectAll("circle").each(function (n: any) {
+                    if ((source === d.id && target === n.id) || (target === d.id && source === n.id)) {
+                      d3.select(this).attr("stroke", "#F56E0F").attr("stroke-width", 2).style("filter", "url(#glow)")
+                    }
+                  })
+                }
+              })
+            })
+            .on("mouseout", () => {
+              // Reset node styles
+              d3.selectAll("circle")
+                .attr("stroke", "#262626")
+                .attr("stroke-width", 1.5)
+                .style("filter", (d: any) => (d.status === "infected" ? "url(#glow)" : "none"))
+
+              // Reset link styles
+              d3.selectAll("line").attr("stroke", "#4b607f").attr("stroke-width", 1.5).attr("stroke-opacity", 0.6)
+            })
+
+          // Animate entrance
+          return enterSelection
+            .transition()
+            .duration(500)
+            .attr("r", (d) => Math.sqrt(d.connections + 1) * 4 + 5)
+            .style("opacity", 1)
+        },
+        // Update existing nodes with transition
+        (update) => {
+          // Update tooltips
+          update.select("title").text((d) => `Agent ${d.id} (${d.status})\nConnections: ${d.connections}`)
+
+          // Transition to new state
+          return update
+            .transition()
+            .duration(500)
+            .attr("r", (d) => Math.sqrt(d.connections + 1) * 4 + 5)
+            .attr("fill", (d) => {
+              switch (d.status) {
+                case "infected":
+                  return "#F56E0F"
+                case "recovered":
+                  return "#4b607f"
+                case "deceased":
+                  return "#878787"
+                default:
+                  return "#FFFFFF"
+              }
+            })
+            .style("filter", (d) => (d.status === "infected" ? "url(#glow)" : "none"))
+        },
+        // Exit nodes with transition
+        (exit) => exit.transition().duration(500).attr("r", 0).style("opacity", 0).remove(),
+      )
+  }, [])
+
+  // Update the graph when the day changes
+  useEffect(() => {
+    if (!svgRef.current || !isSimulationActive() || !graphInitializedRef.current) return
+
+    // Generate data for the current day
+    const { nodes, links } = generateDataForDay(currentDay)
+
+    if (nodes.length === 0) return // Don't update if no data
+
+    // Get the SVG selection
+    const svg = d3.select(svgRef.current)
+
+    // Update links with smooth transitions
+    updateLinks(svg.select(".links"), links)
+
+    // Update nodes with smooth transitions
+    updateNodes(svg.select(".nodes"), nodes)
+
+    // Update the force simulation with new data
+    if (simulationRef.current) {
+      simulationRef.current
+        .nodes(nodes)
+        .force(
+          "link",
+          d3
+            .forceLink<Node, Link>(links)
+            .id((d) => d.id)
+            .distance(70),
+        )
+        .alpha(0.3) // Restart with a moderate alpha
+        .restart()
+    }
+  }, [currentDay, isSimulationActive, generateDataForDay, updateLinks, updateNodes])
 
   // Animation logic
   useEffect(() => {
@@ -631,7 +642,7 @@ export default function ForceDirectedGraph() {
               <GlassCard className="max-w-md text-center p-8" variant="dark">
                 <h2 className="text-2xl font-bold text-white mb-4 font-serif">Simulation Not Started</h2>
                 <p className="text-line-gray mb-6">
-                  Please start a simulation to view the force-directed graph. Configure your parameters on the home
+                  Please start a simulation to view the transmission network. Configure your parameters on the home
                   page.
                 </p>
                 <Button
@@ -646,7 +657,7 @@ export default function ForceDirectedGraph() {
           ) : (
             <div className="flex flex-col space-y-4 sm:space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <h1 className="text-2xl font-bold text-white gradient-text font-serif">Force-Directed Graph</h1>
+                <h1 className="text-2xl font-bold text-white gradient-text font-serif">Transmission Network</h1>
                 <div className="flex flex-wrap gap-2 sm:gap-3">
                   <Button
                     id="zoom-in"
@@ -673,13 +684,9 @@ export default function ForceDirectedGraph() {
                   <div className="flex items-center justify-between mb-4">
                     <div>
                       <h3 className="text-lg font-medium text-white font-serif">Disease Transmission Network</h3>
-                      <p className="text-sm text-line-gray">Visualizing infection spread through social connections</p>
+                      <p className="text-sm text-line-gray">Visualizing infection chains between individuals</p>
                     </div>
                     <div className="flex flex-wrap gap-3">
-                      <div className="flex items-center">
-                        <div className="w-3 h-3 rounded-full bg-white mr-2"></div>
-                        <span className="text-xs text-line-gray">Susceptible</span>
-                      </div>
                       <div className="flex items-center">
                         <div className="w-3 h-3 rounded-full bg-accent-orange mr-2 animate-pulse"></div>
                         <span className="text-xs text-line-gray">Infected</span>
@@ -771,23 +778,23 @@ export default function ForceDirectedGraph() {
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
                       <div className="glass p-3 rounded-lg">
-                        <p className="text-line-gray text-xs">Total Nodes</p>
+                        <p className="text-line-gray text-xs">Infected Individuals</p>
                         <p className="text-white text-lg font-medium">{stats.totalNodes}</p>
                       </div>
 
                       <div className="glass p-3 rounded-lg">
-                        <p className="text-line-gray text-xs">Infected</p>
-                        <p className="text-accent-orange text-lg font-medium">{stats.infectedNodes}</p>
+                        <p className="text-line-gray text-xs">Transmission Events</p>
+                        <p className="text-accent-orange text-lg font-medium">{stats.totalTransmissions}</p>
                       </div>
 
                       <div className="glass p-3 rounded-lg">
-                        <p className="text-line-gray text-xs">Recovered</p>
-                        <p className="text-accent-blue text-lg font-medium">{stats.recoveredNodes}</p>
+                        <p className="text-line-gray text-xs">Max Connections</p>
+                        <p className="text-accent-blue text-lg font-medium">{stats.maxConnections}</p>
                       </div>
 
                       <div className="glass p-3 rounded-lg">
-                        <p className="text-line-gray text-xs">R0</p>
-                        <p className="text-white text-lg font-medium">{stats.r0}</p>
+                        <p className="text-line-gray text-xs">Avg Connections</p>
+                        <p className="text-white text-lg font-medium">{stats.avgConnections}</p>
                       </div>
                     </div>
                   </div>
