@@ -186,7 +186,7 @@ export function EnhancedParticleAnimation({ className }: EnhancedParticleAnimati
         let gridSpot = grid[index]
 
         // Maybe move attractor with certain constraints\
-        if (Math.random() < (speedFactor * 0.5) {
+        if (Math.random() < (speedFactor * 0.5)) {
           // Move attractor
           if (!gridSpot.isEdge) {
             // Change particle's attractor grid spot

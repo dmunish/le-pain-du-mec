@@ -82,10 +82,12 @@ class Person(GeoAgent):
 class DiseaseSpreadModel(Model):
     """Mesa model for SEIRD disease spread simulation."""
     def __init__(self, place: str, infection_prob: float, distance_threshold: float, num_agents: int,
-                 latent_period: int = 120, recovery_period: int = 168, death_rate: float = 0.01, crs="EPSG:4326"):
+                 latent_period: int = 120, recovery_period: int = 168, death_rate: float = 0.01,total_days=90, crs="EPSG:4326",):
         super().__init__()
         self.graph, self.nodes, pois = load_geographic_data(place)
         self.space = GeoSpace()
+        self.total_days = total_days
+        self.progress = 0
         self.schedule = RandomActivation(self)
         self.infection_prob = infection_prob
         self.distance_threshold = distance_threshold
@@ -152,7 +154,11 @@ class DiseaseSpreadModel(Model):
             {
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": a.geometry.coords[0]},
-                "properties": {"id": a.unique_id, "state": a.state}
+                "properties": {
+                    "id": a.unique_id,
+                    "state": a.state,
+                    "age": a.age  # Added age to properties
+                }
             }
             for a in self.schedule.agents if a.state != 'D'
         ]

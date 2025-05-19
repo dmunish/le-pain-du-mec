@@ -10,7 +10,7 @@ def compute_path(graph: nk.Graph, start: int, end: int) -> List[int]:
     if not (0 <= end < graph.numberOfNodes()):
         print("Invalid end node")
         return []
-    dijkstra = nk.distance.Dijkstra(graph, start, end)
+    dijkstra = nk.distance.Dijkstra(graph, start,storePaths=True)
     dijkstra.run()
     path = dijkstra.getPath(end)
     return list(path) if path else []

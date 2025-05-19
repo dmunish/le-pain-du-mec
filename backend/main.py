@@ -9,22 +9,27 @@ class SimulationParams(BaseModel):
     place: str = "Linz, Austria"
     infection_prob: float = 0.2
     distance_threshold: float = 0.5
-    num_agents: int = 50
+    num_agents: int = 500
     latent_period: int = 120
     recovery_period: int = 168
     death_rate: float = 0.01
 
 model = None
 
-@app.get("/start_simulation")
-async def start_simulation():
+@app.post("/api/simulation/initialize")
+async def start_simulation(params):
     """Start a new simulation."""
     global model
-    simulationparams=SimulationParams()
-    model = DiseaseSpreadModel(*simulationparams.dict().values())
-    return {"status": "Simulation started"}
+    model = DiseaseSpreadModel(params.place, params.infection_prob, params.distance_threshold,
+                               params.num_agents, params.latent_period, params.recovery_period, params.death_rate,params.total_days)
+    return {
+        'status': 'running',
+        'currentDay': 0,
+        'totalDays': getattr(params,'simulationDays', 90),
+        'progress': 0
+    }
 
-@app.get("/get_state")
+@app.get("/api/simulation/next")
 async def get_state():
     """Get current simulation state."""
     if model is None:
@@ -33,12 +38,17 @@ async def get_state():
     model.step()
     return state
 
-@app.get("/get_infections")
-async def get_infections():
+@app.get("/api/simulation/status")
+async def get_status():
     """Get infection events."""
     if model is None:
         return {"error": "No simulation running"}
-    return [{"transmitter": t, "receiver": r, "timestamp": ts} for t, r, ts in model.infection_events]
+    return {
+        'status': "running",
+        'currentDay': model.progress//24,
+        'totalDays': model.total_days,
+        'progress': model.progress
+    }
 
 def initialize_simulation(place: str, infection_prob: float, distance_threshold: float, num_agents: int,
                          latent_period: int = 120, recovery_period: int = 168, death_rate: float = 0.01) -> DiseaseSpreadModel:
