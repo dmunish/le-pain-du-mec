@@ -13,36 +13,87 @@ export interface SimulationParameters {
 
   // Disease parameters
   r0: number
-  incubationPeriod: number
-  recoveryTime: number
+  recoveryRate: number
   fatalityRate: number
 
   // Intervention parameters
-  socialDistancing: number
-  maskUsage: number
-  vaccinationRate: number
+  interventions?: Intervention[]
+}
 
-  // Simulation parameters
-  simulationDays: number
-  timeStepSize: number
+export interface Intervention {
+  type: "lockdown" | "vaccination" | "masking" | "social_distancing"
+  startDay: number
+  endDay?: number
+  effectiveness: number
 }
 
 export interface SimulationResponse {
   simulationId: string
-  status: "initializing" | "running" | "paused" | "completed" | "error"
-  message?: string
-  currentDay: number
-  totalDays: number
+  status: string
   progress: number
+  currentDay: number
 }
 
-export interface AgentData {
+export interface Agent {
   id: number
-  status: "susceptible" | "exposed" | "infected" | "recovered" | "deceased"
-  x: number
-  y: number
-  age: number
-  gender: "male" | "female"
+  status: string
+  infectedDay?: number
+  recoveredDay?: number
+  deceasedDay?: number
+  location?: [number, number]
+  age?: number
+  gender?: string
+}
+
+export interface TransmissionEvent {
+  source: number | null
+  target: number | null
+  day: number
+}
+
+export interface SimulationTimeStep {
+  day: number
+  agents: Agent[]
+  transmissionEvents: TransmissionEvent[]
+  stats: {
+    susceptible: number
+    infected: number
+    recovered: number
+    deceased: number
+    r0: number
+  }
+  ageDistribution?: {
+    [key: string]: {
+      susceptible: number
+      infected: number
+      recovered: number
+      deceased: number
+    }
+  }
+  genderDistribution?: {
+    male: {
+      susceptible: number
+      infected: number
+      recovered: number
+      deceased: number
+    }
+    female: {
+      susceptible: number
+      infected: number
+      recovered: number
+      deceased: number
+    }
+  }
+}
+
+export interface SimulationHistoryRequest {
+  simulationId: string
+  startDay: number
+  endDay: number
+}
+
+export interface SimulationHistoryResponse {
+  timeSteps: SimulationTimeStep[]
 }
 
 export interface PopulationStats {
@@ -83,24 +134,4 @@ export interface PopulationStats {
       deceased: number
     }
   }
-}
-
-export interface SimulationTimeStep {
-  day: number
-  agents: AgentData[]
-  stats: PopulationStats
-  r0: number
-  newInfections: number
-  newRecoveries: number
-  newDeaths: number
-}
-
-export interface SimulationHistoryRequest {
-  simulationId: string
-  startDay: number
-  endDay: number
-}
-
-export interface SimulationHistoryResponse {
-  timeSteps: SimulationTimeStep[]
 }
