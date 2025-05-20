@@ -6,25 +6,30 @@ import { GlassCard } from "@/components/glass-card"
 import { Button } from "@/components/ui/button"
 import { HeroOverlay } from "@/components/hero-overlay"
 import { PlaceSearch } from "@/components/place-search"
-import { Play, ChevronDown, ChevronUp, AlertCircle } from "lucide-react"
+import { Play, ChevronDown, ChevronUp, AlertCircle, RefreshCw, Pause, PlayIcon } from "lucide-react"
 import { useSimulation } from "@/context/simulation-context"
 import mapboxgl from "mapbox-gl"
 import "mapbox-gl/dist/mapbox-gl.css"
 import { env } from "@/lib/env"
+import { PollingRateControl } from "@/components/polling-rate-control"
+import type { SimulationParameters } from "@/types/api"
 
 export default function Home() {
-  const { simulation, startSimulation, setLocation } = useSimulation()
+  const { simulation, startSimulation, pauseSimulation, resumeSimulation, resetSimulation, setLocation } =
+    useSimulation()
   const [showHero, setShowHero] = useState(true)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [mapError, setMapError] = useState(false)
-  const [simulationParams, setSimulationParams] = useState({
-    numberOfAgents: 10000,
-    infectionProbability: 0.5,
+  const [simulationParams, setSimulationParams] = useState<SimulationParameters>({
+    placeName: "Linz, Austria", // Default from backend
+    coordinates: [14.2858, 48.3069], // Coordinates for Linz, Austria
+    numberOfAgents: 500, // Default from backend
+    infectionProbability: 0.2, // Default from backend
     duration: 90,
-    latentPeriod: 5,
-    recoveryPeriod: 14,
-    distanceThreshold: 2.0,
-    deathRate: 2.1,
+    latentPeriod: 120, // Default from backend
+    recoveryPeriod: 168, // Default from backend
+    distanceThreshold: 0.5, // Default from backend
+    deathRate: 0.01, // Default from backend
   })
 
   const mapContainer = useRef<HTMLDivElement>(null)
@@ -113,19 +118,48 @@ export default function Home() {
     }
   }, [showHero, simulation.coordinates])
 
-  const handleParamChange = (param: string, value: number) => {
-    setSimulationParams((prev) => ({
-      ...prev,
-      [param]: value,
-    }))
+  const handleParamChange = (param: keyof SimulationParameters, value: number) => {
+    // Ensure value is a valid number
+    if (!isNaN(value)) {
+      setSimulationParams((prev) => ({
+        ...prev,
+        [param]: value,
+      }))
+    }
   }
 
+  // Update the handleStartSimulation function to ensure all parameters are valid
   const handleStartSimulation = () => {
-    startSimulation({
+    // Ensure all numeric parameters are valid numbers
+    const validParams: SimulationParameters = {
+      ...simulationParams,
       placeName: simulation.location,
       coordinates: simulation.coordinates,
-      ...simulationParams,
-    })
+      numberOfAgents: Math.max(1, Number.parseInt(String(simulationParams.numberOfAgents)) || 500),
+      infectionProbability: Math.min(
+        1,
+        Math.max(0, Number.parseFloat(String(simulationParams.infectionProbability)) || 0.2),
+      ),
+      duration: Math.max(1, Number.parseInt(String(simulationParams.duration)) || 90),
+      latentPeriod: Math.max(0, Number.parseInt(String(simulationParams.latentPeriod)) || 120),
+      recoveryPeriod: Math.max(1, Number.parseInt(String(simulationParams.recoveryPeriod)) || 168),
+      distanceThreshold: Math.max(0.1, Number.parseFloat(String(simulationParams.distanceThreshold)) || 0.5),
+      deathRate: Math.max(0, Number.parseFloat(String(simulationParams.deathRate)) || 0.01),
+    }
+
+    // Check if a location has been selected
+    if (!simulation.location) {
+      alert("Please select a location before starting the simulation")
+      return
+    }
+
+    // Start a new simulation - this will discard any previous simulation data
+    startSimulation(validParams)
+  }
+
+  const handleResetSimulation = () => {
+    // Reset the simulation completely
+    resetSimulation()
   }
 
   const handlePlaceSelect = (place: { name: string; coordinates: [number, number] }) => {
@@ -149,6 +183,14 @@ export default function Home() {
         })
       }
     }, 300)
+  }
+
+  const handleTogglePause = () => {
+    if (simulation.status === "running") {
+      pauseSimulation()
+    } else if (simulation.status === "paused") {
+      resumeSimulation()
+    }
   }
 
   return (
@@ -240,7 +282,7 @@ export default function Home() {
             {showAdvanced && (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4">
                 <div>
-                  <label className="text-xs text-line-gray block mb-1">Latent Period (days)</label>
+                  <label className="text-xs text-line-gray block mb-1">Latent Period (hours)</label>
                   <input
                     type="number"
                     className="w-full bg-bg-dark/50 border border-line-gray/30 rounded-md px-3 py-2 text-white text-sm"
@@ -249,7 +291,7 @@ export default function Home() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-line-gray block mb-1">Recovery Period (days)</label>
+                  <label className="text-xs text-line-gray block mb-1">Recovery Period (hours)</label>
                   <input
                     type="number"
                     className="w-full bg-bg-dark/50 border border-line-gray/30 rounded-md px-3 py-2 text-white text-sm"
@@ -268,10 +310,10 @@ export default function Home() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-line-gray block mb-1">Death Rate (%)</label>
+                  <label className="text-xs text-line-gray block mb-1">Death Rate</label>
                   <input
                     type="number"
-                    step="0.1"
+                    step="0.01"
                     className="w-full bg-bg-dark/50 border border-line-gray/30 rounded-md px-3 py-2 text-white text-sm"
                     value={simulationParams.deathRate}
                     onChange={(e) => handleParamChange("deathRate", Number.parseFloat(e.target.value))}
@@ -280,11 +322,51 @@ export default function Home() {
               </div>
             )}
 
-            <div className="flex justify-end">
-              <Button className="bg-accent-orange hover:bg-accent-orange/90 text-white" onClick={handleStartSimulation}>
-                <Play className="h-4 w-4 mr-2" />
-                Start Simulation
-              </Button>
+            <div className="flex items-center justify-between">
+              <div>
+                <PollingRateControl />
+              </div>
+              <div className="flex gap-2">
+                {simulation.status !== "not_started" && (
+                  <>
+                    {(simulation.status === "running" || simulation.status === "paused") && (
+                      <Button
+                        variant="outline"
+                        className="border-accent-orange text-accent-orange hover:bg-accent-orange/10"
+                        onClick={handleTogglePause}
+                      >
+                        {simulation.status === "running" ? (
+                          <>
+                            <Pause className="h-4 w-4 mr-2" />
+                            Pause
+                          </>
+                        ) : (
+                          <>
+                            <PlayIcon className="h-4 w-4 mr-2" />
+                            Resume
+                          </>
+                        )}
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      className="border-accent-orange text-accent-orange hover:bg-accent-orange/10"
+                      onClick={handleResetSimulation}
+                    >
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Reset
+                    </Button>
+                  </>
+                )}
+                <Button
+                  className="bg-accent-orange hover:bg-accent-orange/90 text-white"
+                  onClick={handleStartSimulation}
+                  disabled={simulation.status === "running" || simulation.status === "initializing"}
+                >
+                  <Play className="h-4 w-4 mr-2" />
+                  Start Simulation
+                </Button>
+              </div>
             </div>
           </GlassCard>
 
@@ -308,7 +390,7 @@ export default function Home() {
                 </div>
               </div>
 
-              {simulation.status === "running" && (
+              {(simulation.status === "running" || simulation.status === "paused") && (
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
                   <div className="glass p-3 rounded-lg">
                     <p className="text-line-gray text-xs">Total Agents</p>
@@ -330,7 +412,7 @@ export default function Home() {
                   </div>
                   <div className="glass p-3 rounded-lg">
                     <p className="text-line-gray text-xs">Day</p>
-                    <p className="text-white text-lg font-medium">{simulation.day}</p>
+                    <p className="text-white text-lg font-medium">{Math.floor(simulation.day / 24)}</p>
                   </div>
                 </div>
               )}

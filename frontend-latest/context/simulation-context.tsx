@@ -3,7 +3,7 @@
 import type React from "react"
 import { createContext, useContext, useState, useRef, useCallback, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { initializeSimulation, getNextStep } from "@/lib/api-service"
+import { initializeSimulation, getNextStep, getSimulationStatus } from "@/lib/api-service"
 import type { SimulationParameters, StepResponse, SimulationStatus } from "@/types/api"
 
 // Update the SimulationState interface to include pollingInterval
@@ -20,7 +20,6 @@ interface SimulationState {
   day: number
   location: string
   coordinates: [number, number]
-  simulationId?: string
   currentStepData?: StepResponse
   stepHistory: StepResponse[]
   error?: string
@@ -52,8 +51,8 @@ const initialState: SimulationState = {
   deadAgents: 0,
   step: 0,
   day: 0,
-  location: "New York",
-  coordinates: [-74.006, 40.7128],
+  location: "Linz, Austria", // Updated to match backend default
+  coordinates: [14.2858, 48.3069], // Coordinates for Linz, Austria
   stepHistory: [],
   pollingInterval: 1000, // Default polling interval: 1 second
 }
@@ -65,6 +64,7 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
   const [duration, setDuration] = useState<number>(90) // Default duration in days
   const router = useRouter()
   const stepInterval = useRef<NodeJS.Timeout | null>(null)
+  const statusInterval = useRef<NodeJS.Timeout | null>(null)
   const isInitializedRef = useRef<boolean>(false)
   const isPausedRef = useRef<boolean>(false)
 
@@ -74,37 +74,45 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
       if (stepInterval.current) {
         clearInterval(stepInterval.current)
       }
+      if (statusInterval.current) {
+        clearInterval(statusInterval.current)
+      }
     }
   }, [])
 
   const startSimulation = useCallback(
     async (params: SimulationParameters) => {
       try {
-        // Set initialized flag immediately
+        // Clear any existing intervals
+        if (stepInterval.current) {
+          clearInterval(stepInterval.current)
+          stepInterval.current = null
+        }
+        if (statusInterval.current) {
+          clearInterval(statusInterval.current)
+          statusInterval.current = null
+        }
+
+        // Reset all simulation data
+        setSimulation({
+          ...initialState,
+          status: "initializing",
+          location: params.placeName || initialState.location,
+          coordinates: params.coordinates || initialState.coordinates,
+          pollingInterval: simulation.pollingInterval, // Keep current polling interval
+        })
+
+        // Reset refs
         isInitializedRef.current = true
         isPausedRef.current = false
 
         // Store duration for later use
         setDuration(params.duration)
 
-        // Clear any existing interval
-        if (stepInterval.current) {
-          clearInterval(stepInterval.current)
-          stepInterval.current = null
-        }
-
-        // Reset to initial state first
-        setSimulation({
-          ...initialState,
-          status: "initializing",
-          location: params.placeName || simulation.location,
-          coordinates: params.coordinates || simulation.coordinates,
-        })
-
         // Initialize simulation with backend
         const response = await initializeSimulation({
-          placeName: params.placeName || simulation.location,
-          coordinates: params.coordinates || simulation.coordinates,
+          placeName: params.placeName || initialState.location,
+          coordinates: params.coordinates || initialState.coordinates,
           numberOfAgents: params.numberOfAgents,
           infectionProbability: params.infectionProbability,
           distanceThreshold: params.distanceThreshold,
@@ -114,16 +122,21 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
           deathRate: params.deathRate,
         })
 
-        // Update state with simulation ID and initial status
+        // Update state with initial status
+        // Handle both totalDays and simulationDays from backend
+        const totalDays = response.totalDays || response.simulationDays || params.duration
+
         setSimulation((prev) => ({
           ...prev,
-          simulationId: response.simulationId,
           status: response.status as SimulationStatus,
+          day: response.currentDay || 0,
+          progress: response.progress || 0,
         }))
 
         // Start fetching steps if simulation is running
         if (response.status === "running") {
-          startFetchingSteps(response.simulationId)
+          startFetchingSteps()
+          startPollingStatus()
         }
       } catch (error) {
         console.error("Error starting simulation:", error)
@@ -134,97 +147,133 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
         }))
       }
     },
-    [simulation.location, simulation.coordinates],
+    [simulation.pollingInterval],
   )
 
-  // Update the startFetchingSteps method to use the pollingInterval
-  const startFetchingSteps = useCallback(
-    (simulationId: string) => {
-      // Clear any existing interval
-      if (stepInterval.current) {
-        clearInterval(stepInterval.current)
-      }
+  // Add a new method to poll the simulation status
+  const startPollingStatus = useCallback(() => {
+    // Clear any existing interval
+    if (statusInterval.current) {
+      clearInterval(statusInterval.current)
+    }
 
-      // Set up interval to fetch steps
-      stepInterval.current = setInterval(async () => {
-        try {
-          // If paused, don't fetch new steps
-          if (isPausedRef.current) {
-            return
-          }
-
-          // Check if we've reached the duration (in days)
-          // Each day has 24 steps (hours)
-          const currentStep = simulation.step
-          const maxSteps = duration * 24
-
-          if (currentStep >= maxSteps) {
-            // We've reached the end of the simulation
-            clearInterval(stepInterval.current!)
-            stepInterval.current = null
-            setSimulation((prev) => ({
-              ...prev,
-              status: "completed",
-              progress: 100,
-            }))
-            return
-          }
-
-          const stepData = await getNextStep(simulationId)
-
-          setSimulation((prev) => {
-            // Add step to history
-            const updatedHistory = [...prev.stepHistory, stepData]
-
-            // Calculate day from step (24 steps per day)
-            const day = Math.floor(stepData.step / 24)
-
-            return {
-              ...prev,
-              step: stepData.step,
-              day,
-              currentStepData: stepData,
-              stepHistory: updatedHistory,
-              totalAgents:
-                stepData.seird_counts.S +
-                stepData.seird_counts.E +
-                stepData.seird_counts.I +
-                stepData.seird_counts.R +
-                stepData.seird_counts.D,
-              healthyAgents: stepData.seird_counts.S,
-              exposedAgents: stepData.seird_counts.E,
-              infectedAgents: stepData.seird_counts.I,
-              recoveredAgents: stepData.seird_counts.R,
-              deadAgents: stepData.seird_counts.D,
-              progress: (stepData.step / maxSteps) * 100,
-            }
-          })
-        } catch (error) {
-          console.error("Error fetching step:", error)
-          clearInterval(stepInterval.current!)
-          stepInterval.current = null
-          setSimulation((prev) => ({
-            ...prev,
-            status: "error",
-            error: error instanceof Error ? error.message : "Unknown error fetching step",
-          }))
+    // Set up interval to fetch status
+    statusInterval.current = setInterval(async () => {
+      try {
+        // If paused, don't fetch new status
+        if (isPausedRef.current) {
+          return
         }
-      }, simulation.pollingInterval) // Use the configurable polling interval
-    },
-    [duration, simulation.step, simulation.pollingInterval],
-  )
+
+        const statusData = await getSimulationStatus()
+
+        // Handle both totalDays and simulationDays from backend
+        const totalDays = statusData.totalDays || statusData.simulationDays || duration
+
+        setSimulation((prev) => {
+          return {
+            ...prev,
+            status: statusData.status as SimulationStatus,
+            day: statusData.currentDay || prev.day,
+            progress: ((statusData.progress || 0) / (totalDays * 24)) * 100,
+          }
+        })
+
+        // If simulation is completed, stop polling
+        if (statusData.status === "completed") {
+          if (statusInterval.current) {
+            clearInterval(statusInterval.current)
+            statusInterval.current = null
+          }
+          if (stepInterval.current) {
+            clearInterval(stepInterval.current)
+            stepInterval.current = null
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching status:", error)
+      }
+    }, simulation.pollingInterval * 2) // Poll status less frequently than steps
+  }, [duration, simulation.pollingInterval])
+
+  // Update the startFetchingSteps method to work with the backend
+  const startFetchingSteps = useCallback(() => {
+    // Clear any existing interval
+    if (stepInterval.current) {
+      clearInterval(stepInterval.current)
+    }
+
+    // Set up interval to fetch steps
+    stepInterval.current = setInterval(async () => {
+      try {
+        // If paused, don't fetch new steps
+        if (isPausedRef.current) {
+          return
+        }
+
+        const stepData = await getNextStep()
+
+        // Check if there's an error
+        if (stepData.error) {
+          console.error("Error from backend:", stepData.error)
+          return
+        }
+
+        // Use the seird_counts directly from the backend response
+        const seirdCounts = stepData.seird_counts || {
+          S: 0,
+          E: 0,
+          I: 0,
+          R: 0,
+          D: 0,
+        }
+
+        setSimulation((prev) => {
+          // Add step to history
+          const updatedHistory = [...prev.stepHistory, stepData]
+
+          return {
+            ...prev,
+            step: prev.step + 1,
+            day: stepData.day !== undefined ? stepData.day : Math.floor(prev.step / 24),
+            currentStepData: stepData,
+            stepHistory: updatedHistory,
+            totalAgents: seirdCounts.S + seirdCounts.E + seirdCounts.I + seirdCounts.R + seirdCounts.D,
+            healthyAgents: seirdCounts.S,
+            exposedAgents: seirdCounts.E,
+            infectedAgents: seirdCounts.I,
+            recoveredAgents: seirdCounts.R,
+            deadAgents: seirdCounts.D,
+          }
+        })
+      } catch (error) {
+        console.error("Error fetching step:", error)
+      }
+    }, simulation.pollingInterval) // Use the configurable polling interval
+  }, [simulation.pollingInterval])
 
   const fetchNextStep = useCallback(async (): Promise<StepResponse | null> => {
-    if (!simulation.simulationId || simulation.status !== "running") {
+    if (simulation.status !== "running") {
       return null
     }
 
     try {
-      const stepData = await getNextStep(simulation.simulationId)
+      const stepData = await getNextStep()
 
-      // Calculate day from step (24 steps per day)
-      const day = Math.floor(stepData.step / 24)
-      const maxSteps = duration * 24
+      // Check if there's an error
+      if (stepData.error) {
+        console.error("Error from backend:", stepData.error)
+        return null
+      }
+
+      // Use the seird_counts directly from the backend response
+      const seirdCounts = stepData.seird_counts || {
+        S: 0,
+        E: 0,
+        I: 0,
+        R: 0,
+        D: 0,
+      }
 
       setSimulation((prev) => {
         // Add step to history
@@ -232,22 +281,16 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
 
         return {
           ...prev,
-          step: stepData.step,
-          day,
+          step: prev.step + 1,
+          day: stepData.day !== undefined ? stepData.day : Math.floor(prev.step / 24),
           currentStepData: stepData,
           stepHistory: updatedHistory,
-          totalAgents:
-            stepData.seird_counts.S +
-            stepData.seird_counts.E +
-            stepData.seird_counts.I +
-            stepData.seird_counts.R +
-            stepData.seird_counts.D,
-          healthyAgents: stepData.seird_counts.S,
-          exposedAgents: stepData.seird_counts.E,
-          infectedAgents: stepData.seird_counts.I,
-          recoveredAgents: stepData.seird_counts.R,
-          deadAgents: stepData.seird_counts.D,
-          progress: (stepData.step / maxSteps) * 100,
+          totalAgents: seirdCounts.S + seirdCounts.E + seirdCounts.I + seirdCounts.R + seirdCounts.D,
+          healthyAgents: seirdCounts.S,
+          exposedAgents: seirdCounts.E,
+          infectedAgents: seirdCounts.I,
+          recoveredAgents: seirdCounts.R,
+          deadAgents: seirdCounts.D,
         }
       })
 
@@ -256,8 +299,9 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
       console.error("Error fetching next step:", error)
       return null
     }
-  }, [simulation.simulationId, simulation.status, duration])
+  }, [simulation.status])
 
+  // Since the backend doesn't have pause/resume endpoints, we'll handle it client-side
   const pauseSimulation = useCallback(() => {
     isPausedRef.current = true
     setSimulation((prev) => ({
@@ -275,10 +319,14 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
   }, [])
 
   const resetSimulation = useCallback(() => {
-    // Clear interval
+    // Clear intervals
     if (stepInterval.current) {
       clearInterval(stepInterval.current)
       stepInterval.current = null
+    }
+    if (statusInterval.current) {
+      clearInterval(statusInterval.current)
+      statusInterval.current = null
     }
 
     // Reset state
@@ -297,7 +345,6 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
   }, [])
 
   // Add the setPollingInterval method to the SimulationProvider
-  // Add this after the setLocation method
   const setPollingInterval = useCallback(
     (interval: number) => {
       setSimulation((prev) => ({
@@ -306,12 +353,16 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
       }))
 
       // If there's an active interval, restart it with the new polling rate
-      if (stepInterval.current && simulation.simulationId && !isPausedRef.current) {
+      if (stepInterval.current && !isPausedRef.current) {
         clearInterval(stepInterval.current)
-        startFetchingSteps(simulation.simulationId)
+        startFetchingSteps()
+      }
+      if (statusInterval.current && !isPausedRef.current) {
+        clearInterval(statusInterval.current)
+        startPollingStatus()
       }
     },
-    [simulation.simulationId, startFetchingSteps],
+    [startFetchingSteps, startPollingStatus],
   )
 
   // Simplified check that just uses the ref
@@ -319,7 +370,6 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
     return isInitializedRef.current
   }, [])
 
-  // Update the SimulationContext.Provider value to include setPollingInterval
   return (
     <SimulationContext.Provider
       value={{

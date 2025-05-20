@@ -21,6 +21,7 @@ import {
   Filler,
 } from "chart.js"
 import { Line, Doughnut, Bar } from "react-chartjs-2"
+import { PollingRateControl } from "@/components/polling-rate-control"
 
 // Register ChartJS components
 ChartJS.register(
@@ -72,14 +73,14 @@ const chartColors = {
   },
 }
 
-// Mock data for age distribution
-const generateAgeMockData = (day, totalHealthy, totalInfected, totalRecovered, totalDeceased) => {
+// Generate age distribution data based on real counts
+const generateAgeDistributionData = (day, totalHealthy, totalInfected, totalRecovered, totalDeceased) => {
   const ageGroups = ["0-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70-79", "80+"]
 
   // Distribution patterns that change slightly with time
   const dayFactor = Math.min(day / 30, 1) // Normalize day to a factor between 0-1
 
-  // Generate mock data based on current simulation numbers
+  // Generate data based on current simulation numbers
   const healthyData = ageGroups.map((_, i) => {
     // Distribute healthy people with more in middle age groups, decreasing over time for older groups
     const distribution = [
@@ -164,10 +165,10 @@ export default function ChartsPage() {
 
     return simulation.stepHistory.map((step) => ({
       day: step.step,
-      healthy: step.seird_counts.S,
-      infected: step.seird_counts.I,
-      recovered: step.seird_counts.R,
-      deceased: step.seird_counts.D,
+      healthy: step.seird_counts?.S || 0,
+      infected: (step.seird_counts?.E || 0) + (step.seird_counts?.I || 0), // Combine exposed and infected
+      recovered: step.seird_counts?.R || 0,
+      deceased: step.seird_counts?.D || 0,
     }))
   }, [simulation?.stepHistory])
 
@@ -182,12 +183,14 @@ export default function ChartsPage() {
         deceased: 0,
       }
 
+    const counts = simulation.currentStepData.seird_counts || { S: 0, E: 0, I: 0, R: 0, D: 0 }
+
     return {
-      day: simulation.currentStepData.step,
-      healthy: simulation.currentStepData.seird_counts.S,
-      infected: simulation.currentStepData.seird_counts.I,
-      recovered: simulation.currentStepData.seird_counts.R,
-      deceased: simulation.currentStepData.seird_counts.D,
+      day: simulation.currentStepData.step || 0,
+      healthy: counts.S,
+      infected: counts.E + counts.I, // Combine exposed and infected
+      recovered: counts.R,
+      deceased: counts.D,
     }
   }, [simulation?.currentStepData])
 
@@ -310,7 +313,7 @@ export default function ChartsPage() {
   }
 
   // Get age distribution data for current day
-  const ageData = generateAgeMockData(
+  const ageData = generateAgeDistributionData(
     currentDayData.day,
     currentDayData.healthy,
     currentDayData.infected,
@@ -361,7 +364,7 @@ export default function ChartsPage() {
     maintainAspectRatio: false,
     plugins: {
       legend: {
-        position: "top" as const,
+        position: "top",
         labels: {
           color: "rgba(255, 255, 255, 0.8)",
           font: {
@@ -409,7 +412,7 @@ export default function ChartsPage() {
     cutout: "70%",
     plugins: {
       legend: {
-        position: "right" as const,
+        position: "right",
         labels: {
           color: "rgba(255, 255, 255, 0.8)",
           font: {
@@ -436,10 +439,10 @@ export default function ChartsPage() {
   const pyramidOptions = {
     responsive: true,
     maintainAspectRatio: false,
-    indexAxis: "y" as const,
+    indexAxis: "y",
     plugins: {
       legend: {
-        position: "top" as const,
+        position: "top",
         labels: {
           color: "rgba(255, 255, 255, 0.8)",
           font: {
@@ -528,8 +531,11 @@ export default function ChartsPage() {
               <h2 className="text-2xl sm:text-3xl font-bold text-white mt-2 font-serif">Simulation Charts</h2>
             </div>
 
-            <div className="text-white text-sm">
-              Day: <span className="font-medium">{currentDayData.day}</span>
+            <div className="flex items-center gap-4">
+              <div className="text-white text-sm">
+                Day: <span className="font-medium">{Math.floor(currentDayData.day / 24)}</span>
+              </div>
+              <PollingRateControl />
             </div>
           </div>
 

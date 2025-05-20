@@ -23,6 +23,7 @@ interface Node extends d3.SimulationNodeDatum {
   color: string
   coordinates: [number, number]
   infectedAt?: number // Step when infection was detected
+  state?: string      // Current state of the agent
 }
 
 interface Link extends d3.SimulationLinkDatum<Node> {
@@ -38,7 +39,6 @@ const generateDummyData = () => {
   const nodes: Node[] = []
   const links: Link[] = []
 
-  // Create 5 dummy nodes with coordinates
   for (let i = 1; i <= 5; i++) {
     nodes.push({
       id: i,
@@ -50,7 +50,6 @@ const generateDummyData = () => {
     })
   }
 
-  // Create infection chain links
   for (let i = 1; i < nodes.length; i++) {
     links.push({
       id: `${nodes[i - 1].id}-${nodes[i].id}`,
@@ -71,26 +70,18 @@ const calculateDistance = (coord1: [number, number], coord2: [number, number]): 
   return Math.sqrt(dx * dx + dy * dy)
 }
 
-// Find closest infected node
-const findClosestInfectedNode = (newNode: Node, existingNodes: Node[], currentStep: number): Node | null => {
-  if (existingNodes.length === 0) return null
+// Find closest infected node from previous step
+const findClosestInfectedNode = (newNode: Node, previousInfectedNodes: Node[]): Node | null => {
+  if (previousInfectedNodes.length === 0) return null
 
-  // Filter nodes that were infected before the current step
-  const possibleInfectors = existingNodes.filter(
-    (node) => node.id !== newNode.id && node.infectedAt !== undefined && node.infectedAt < currentStep,
-  )
-
-  if (possibleInfectors.length === 0) return null
-
-  // Find the closest node by coordinates
-  let closestNode = possibleInfectors[0]
+  let closestNode = previousInfectedNodes[0]
   let minDistance = calculateDistance(newNode.coordinates, closestNode.coordinates)
 
-  for (let i = 1; i < possibleInfectors.length; i++) {
-    const distance = calculateDistance(newNode.coordinates, possibleInfectors[i].coordinates)
+  for (let i = 1; i < previousInfectedNodes.length; i++) {
+    const distance = calculateDistance(newNode.coordinates, previousInfectedNodes[i].coordinates)
     if (distance < minDistance) {
       minDistance = distance
-      closestNode = possibleInfectors[i]
+      closestNode = previousInfectedNodes[i]
     }
   }
 
@@ -111,7 +102,6 @@ export default function ForceDirectedGraph() {
     avgTransmissions: 0,
   })
 
-  // Create a reference to the D3 simulation
   const simulationRef = useRef<d3.Simulation<Node, Link> | null>(null)
   const nodesMapRef = useRef<Map<number, Node>>(new Map())
   const previousInfectedIdsRef = useRef<Set<number>>(new Set())
@@ -120,7 +110,7 @@ export default function ForceDirectedGraph() {
   const totalTransmissionsRef = useRef<number>(0)
   const isInitializedRef = useRef<boolean>(false)
 
-  // Process simulation data to extract infected agents and create graph data
+  // Process simulation data to include all ever-infected agents
   const processSimulationData = useCallback(() => {
     if (!simulation?.currentStepData) {
       console.log("No current step data available, using dummy data")
@@ -130,9 +120,9 @@ export default function ForceDirectedGraph() {
     const currentStep = simulation.currentStepData.step
     console.log(`Processing data for step ${currentStep}`)
 
-    // Extract infected agents from the current step data
-    const infectedAgents: Agent[] = simulation.currentStepData.agents.features
-      .filter((agent) => agent.properties.state === "I")
+    // Include agents that are "I" or "R" (ever infected)
+    const everInfectedAgents: Agent[] = simulation.currentStepData.agents.features
+      .filter((agent) => agent.properties.state === "I" || agent.properties.state === "R")
       .map((agent) => ({
         id: agent.properties.id,
         state: agent.properties.state,
@@ -140,119 +130,98 @@ export default function ForceDirectedGraph() {
         coordinates: agent.geometry.coordinates as [number, number],
       }))
 
-    console.log(`Found ${infectedAgents.length} infected agents`)
+    console.log(`Found ${everInfectedAgents.length} ever-infected agents`)
 
-    // If no infected agents, use dummy data
-    if (infectedAgents.length === 0) {
-      console.log("No infected agents found, using dummy data")
+    if (everInfectedAgents.length === 0) {
+      console.log("No ever-infected agents found, using dummy data")
       return generateDummyData()
     }
 
-    // Get current nodes map and links map
     const currentNodesMap = nodesMapRef.current
     const currentLinksMap = linksMapRef.current
     const newNodesMap = new Map<number, Node>()
     const newLinksMap = new Map<string, Link>()
-
-    // Get the set of previously infected agent IDs
     const previousInfectedIds = previousInfectedIdsRef.current
-    const currentInfectedIds = new Set<number>()
-
-    // Create or update nodes for each infected agent
+    const currentInfectedIds = new Set(everInfectedAgents.filter((agent) => agent.state === "I").map((agent) => agent.id))
     const nodes: Node[] = []
+    const links: Link[] = []
 
-    for (const agent of infectedAgents) {
-      currentInfectedIds.add(agent.id)
-
-      // Check if node already exists
-      const existingNode = currentNodesMap.get(agent.id)
-
-      if (existingNode) {
-        // Update existing node
-        existingNode.age = agent.age
-        existingNode.radius = 10 + agent.age / 10
-        existingNode.coordinates = agent.coordinates
-        nodes.push(existingNode)
-        newNodesMap.set(agent.id, existingNode)
-      } else {
-        // Create new node - this is a newly infected agent
-        const newNode: Node = {
+    // Create or update nodes for all ever-infected agents
+    for (const agent of everInfectedAgents) {
+      let node = currentNodesMap.get(agent.id)
+      if (!node) {
+        node = {
           id: agent.id,
           age: agent.age,
           radius: 10 + agent.age / 10,
-          color: "#F56E0F",
+          color: agent.state === "I" ? "#F56E0F" : "#AAAAAA", // Orange for "I", gray for "R"
           coordinates: agent.coordinates,
-          infectedAt: currentStep,
+          infectedAt: agent.state === "I" ? currentStep : undefined, // Set for new infections
+          state: agent.state,
         }
-        nodes.push(newNode)
-        newNodesMap.set(agent.id, newNode)
+        newNodesMap.set(agent.id, node)
+      } else {
+        node.age = agent.age
+        node.radius = 10 + agent.age / 10
+        node.coordinates = agent.coordinates
+        node.state = agent.state
+        node.color = agent.state === "I" ? "#F56E0F" : "#AAAAAA"
+        if (!node.infectedAt && agent.state === "I") {
+          node.infectedAt = currentStep // Set infection time when first seen as "I"
+        }
       }
+      nodes.push(node)
     }
 
-    // Find newly infected agents
-    const newlyInfectedNodes: Node[] = []
-    for (const nodeId of currentInfectedIds) {
-      if (!previousInfectedIds.has(nodeId)) {
-        const node = newNodesMap.get(nodeId)
-        if (node) {
-          newlyInfectedNodes.push(node)
-        }
-      }
-    }
+    // Identify newly infected agents
+    const newlyInfectedIds = Array.from(currentInfectedIds).filter((id) => !previousInfectedIds.has(id))
+    const newlyInfectedNodes = newlyInfectedIds.map((id) => newNodesMap.get(id)).filter(Boolean) as Node[]
 
     console.log(`Found ${newlyInfectedNodes.length} newly infected agents`)
 
-    // Create links for infection events
-    const links: Link[] = []
-
-    // First, keep existing links
+    // Retain existing links
     currentLinksMap.forEach((link) => {
-      // Only keep links where both source and target are still in the graph
       const sourceId = typeof link.source === "object" ? link.source.id : link.source
       const targetId = typeof link.target === "object" ? link.target.id : link.target
-
       if (newNodesMap.has(sourceId) && newNodesMap.has(targetId)) {
         links.push(link)
         newLinksMap.set(link.id, link)
       }
     })
 
-    // Then add new links for newly infected agents
+    // Create links for newly infected agents
+    const previousInfectedNodes = Array.from(previousInfectedIds)
+      .map((id) => newNodesMap.get(id))
+      .filter(Boolean) as Node[]
     for (const newNode of newlyInfectedNodes) {
-      const closestNode = findClosestInfectedNode(newNode, nodes, currentStep)
-
+      const closestNode = findClosestInfectedNode(newNode, previousInfectedNodes)
       if (closestNode) {
         const linkId = `${closestNode.id}-${newNode.id}`
-
-        // Create a new link representing the infection event
-        const newLink: Link = {
-          id: linkId,
-          source: closestNode.id,
-          target: newNode.id,
-          value: 1,
-          infectionEvent: true,
+        if (!newLinksMap.has(linkId)) {
+          const newLink: Link = {
+            id: linkId,
+            source: closestNode.id,
+            target: newNode.id,
+            value: 1,
+            infectionEvent: true,
+          }
+          links.push(newLink)
+          newLinksMap.set(linkId, newLink)
+          totalTransmissionsRef.current += 1
         }
-
-        links.push(newLink)
-        newLinksMap.set(linkId, newLink)
-
-        // Increment total transmissions counter
-        totalTransmissionsRef.current += 1
       }
     }
 
-    // Update refs for next time
+    // Update refs
     nodesMapRef.current = newNodesMap
     linksMapRef.current = newLinksMap
     previousInfectedIdsRef.current = currentInfectedIds
 
-    // Update max infected count
-    const currentInfectedCount = nodes.length
+    // Update stats
+    const currentInfectedCount = currentInfectedIds.size
     if (currentInfectedCount > maxInfectedRef.current) {
       maxInfectedRef.current = currentInfectedCount
     }
-
-    // Calculate statistics
     const avgTransmissions = nodes.length > 0 ? links.length / nodes.length : 0
 
     setStats({
@@ -280,14 +249,11 @@ export default function ForceDirectedGraph() {
     const width = svgRef.current.clientWidth
     const height = svgRef.current.clientHeight
 
-    // Clear any existing content
     svg.selectAll("*").remove()
 
-    // Create a group for the graph
     const g = svg.append("g")
     gRef.current = g.node()
 
-    // Add zoom behavior
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
@@ -297,15 +263,11 @@ export default function ForceDirectedGraph() {
 
     zoomRef.current = zoom
     svg.call(zoom)
-
-    // Center the graph initially
     svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8))
 
-    // Create groups for links and nodes
     g.append("g").attr("class", "links")
     g.append("g").attr("class", "nodes")
 
-    // Create the simulation with optimized parameters for better organization
     const simulation = d3
       .forceSimulation<Node, Link>()
       .force(
@@ -313,27 +275,25 @@ export default function ForceDirectedGraph() {
         d3
           .forceLink<Node, Link>()
           .id((d) => d.id)
-          .distance(150) // Increased for better spacing
-          .strength(0.7), // Stronger links to maintain structure
+          .distance(150)
+          .strength(0.7),
       )
-      .force("charge", d3.forceManyBody().strength(-300).distanceMax(500)) // Stronger repulsion with distance limit
-      .force("center", d3.forceCenter(0, 0).strength(0.1)) // Gentle centering force
+      .force("charge", d3.forceManyBody().strength(-300).distanceMax(500))
+      .force("center", d3.forceCenter(0, 0).strength(0.1))
       .force(
         "collision",
         d3
           .forceCollide()
           .radius((d) => (d.radius || 10) + 10)
-          .strength(0.8), // Stronger collision avoidance
+          .strength(0.8),
       )
-      .force("x", d3.forceX(0).strength(0.05)) // Gentle force toward center x
-      .force("y", d3.forceY(0).strength(0.05)) // Gentle force toward center y
-      .alphaDecay(0.02) // Slower cooling for better settling
-      .velocityDecay(0.3) // Less damping for more responsive movement
+      .force("x", d3.forceX(0).strength(0.05))
+      .force("y", d3.forceY(0).strength(0.05))
+      .alphaDecay(0.02)
+      .velocityDecay(0.3)
 
-    // Store the simulation reference
     simulationRef.current = simulation
     isInitializedRef.current = true
-
     console.log("Graph initialization complete")
 
     return () => {
@@ -345,72 +305,48 @@ export default function ForceDirectedGraph() {
 
   // Update the visualization when graph data changes
   useEffect(() => {
-    if (!svgRef.current || !gRef.current) {
-      console.log("SVG or G element not available")
-      return
-    }
-
-    if (!simulationRef.current) {
-      console.log("Simulation not initialized")
-      return
-    }
+    if (!svgRef.current || !gRef.current || !simulationRef.current) return
 
     console.log(`Updating graph with ${graphData.nodes.length} nodes and ${graphData.links.length} links`)
 
     const g = d3.select(gRef.current)
     const simulation = simulationRef.current
 
-    // Update links with enter/update/exit pattern
     const linkGroup = g.select(".links")
     const linkSelection = linkGroup.selectAll<SVGLineElement, Link>("line").data(graphData.links, (d: any) => d.id)
-
-    // Remove old links with transition
     linkSelection.exit().transition().duration(300).attr("opacity", 0).remove()
-
-    // Add new links with transition
     const enterLinks = linkSelection
       .enter()
       .append("line")
       .attr("stroke", "rgba(255, 255, 255, 0.7)")
       .attr("stroke-width", 1.5)
       .attr("opacity", 0)
-      .attr("marker-end", "url(#arrow)") // Add arrow marker
-
+      .attr("marker-end", "url(#arrow)")
     enterLinks.transition().duration(300).attr("opacity", 0.7)
 
-    // Update nodes with enter/update/exit pattern
     const nodeGroup = g.select(".nodes")
     const nodeSelection = nodeGroup.selectAll<SVGCircleElement, Node>("circle").data(graphData.nodes, (d: any) => d.id)
-
-    // Remove old nodes with transition
     nodeSelection.exit().transition().duration(300).attr("r", 0).attr("opacity", 0).remove()
 
-    // Enhanced drag behavior that doesn't fix node positions
     const drag = d3
       .drag<SVGCircleElement, Node>()
       .on("start", (event, d) => {
         if (!event.active) simulation.alphaTarget(0.3).restart()
-        // Temporarily fix position during drag
         d.fx = d.x
         d.fy = d.y
-        // Change cursor to grabbing
         d3.select(event.sourceEvent.currentTarget).style("cursor", "grabbing")
       })
       .on("drag", (event, d) => {
-        // Update fixed position during drag
         d.fx = event.x
         d.fy = event.y
       })
       .on("end", (event, d) => {
         if (!event.active) simulation.alphaTarget(0.1).restart()
-        // Release fixed position after drag to allow forces to act
         d.fx = null
         d.fy = null
-        // Change cursor back to grab
         d3.select(event.sourceEvent.currentTarget).style("cursor", "grab")
       })
 
-    // Add new nodes with transition
     const enterNodes = nodeSelection
       .enter()
       .append("circle")
@@ -419,7 +355,7 @@ export default function ForceDirectedGraph() {
       .attr("stroke", "#262626")
       .attr("stroke-width", 2)
       .attr("opacity", 0)
-      .style("cursor", "grab") // Set cursor to grab to indicate draggable
+      .style("cursor", "grab")
       .call(drag as any)
       .on("mouseover", function () {
         d3.select(this).attr("stroke", "#ffffff").attr("stroke-width", 3)
@@ -428,29 +364,18 @@ export default function ForceDirectedGraph() {
         d3.select(this).attr("stroke", "#262626").attr("stroke-width", 2)
       })
 
-    // Add tooltips
-    enterNodes.append("title").text((d) => `Agent ID: ${d.id}\nAge: ${d.age}\nInfected at step: ${d.infectedAt}`)
-
-    // Transition new nodes in
-    enterNodes
-      .transition()
-      .duration(300)
-      .attr("r", (d) => d.radius)
-      .attr("opacity", 1)
-
-    // Update existing nodes
+    enterNodes.append("title").text((d) => `Agent ID: ${d.id}\nAge: ${d.age}\nInfected at step: ${d.infectedAt || "N/A"}`)
+    enterNodes.transition().duration(300).attr("r", (d) => d.radius).attr("opacity", 1)
     nodeSelection
       .transition()
       .duration(300)
       .attr("r", (d) => d.radius)
       .select("title")
-      .text((d) => `Agent ID: ${d.id}\nAge: ${d.age}\nInfected at step: ${d.infectedAt}`)
+      .text((d) => `Agent ID: ${d.id}\nAge: ${d.age}\nInfected at step: ${d.infectedAt || "N/A"}`)
 
-    // Update the simulation
     simulation.nodes(graphData.nodes)
     simulation.force<d3.ForceLink<Node, Link>>("link")?.links(graphData.links)
 
-    // Update positions on each tick
     simulation.on("tick", () => {
       linkGroup
         .selectAll("line")
@@ -471,33 +396,23 @@ export default function ForceDirectedGraph() {
           return target?.y || 0
         })
 
-      nodeGroup
-        .selectAll("circle")
-        .attr("cx", (d) => d.x || 0)
-        .attr("cy", (d) => d.y || 0)
+      nodeGroup.selectAll("circle").attr("cx", (d) => d.x || 0).attr("cy", (d) => d.y || 0)
     })
 
-    // Restart the simulation with a gentle alpha
     simulation.alpha(0.5).restart()
   }, [graphData])
 
   // Add arrow marker for directed edges
   useEffect(() => {
     if (!svgRef.current) return
-
     const svg = d3.select(svgRef.current)
-
-    // Remove any existing markers
     svg.select("defs").remove()
-
-    // Add arrow marker definition
     const defs = svg.append("defs")
-
     defs
       .append("marker")
       .attr("id", "arrow")
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 20) // Position the arrow away from the end of the line
+      .attr("refX", 20)
       .attr("refY", 0)
       .attr("markerWidth", 6)
       .attr("markerHeight", 6)
@@ -512,13 +427,10 @@ export default function ForceDirectedGraph() {
     if (!svgRef.current || !zoomRef.current) return
     const width = svgRef.current.clientWidth
     const height = svgRef.current.clientHeight
-
     d3.select(svgRef.current)
       .transition()
       .duration(500)
       .call(zoomRef.current.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8))
-
-    // Also restart the simulation with the center force
     if (simulationRef.current) {
       simulationRef.current.alpha(0.3).restart()
     }
@@ -583,17 +495,14 @@ export default function ForceDirectedGraph() {
                       <p className="text-line-gray text-xs">Infected (Current)</p>
                       <p className="text-accent-orange text-lg font-medium">{stats.infectedCurrent}</p>
                     </div>
-
                     <div className="glass p-3 rounded-lg">
                       <p className="text-line-gray text-xs">Infected (Max)</p>
                       <p className="text-white text-lg font-medium">{stats.infectedMax}</p>
                     </div>
-
                     <div className="glass p-3 rounded-lg">
                       <p className="text-line-gray text-xs">Transmission Events</p>
                       <p className="text-accent-blue text-lg font-medium">{stats.transmissionsTotal}</p>
                     </div>
-
                     <div className="glass p-3 rounded-lg">
                       <p className="text-line-gray text-xs">Avg Transmissions</p>
                       <p className="text-white text-lg font-medium">{stats.avgTransmissions}</p>

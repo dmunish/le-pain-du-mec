@@ -2,8 +2,18 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 from simulation import DiseaseSpreadModel
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# Allow requests from any origin (for dev); restrict this in production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or specify ["http://localhost:3000"] for local frontend
+    allow_credentials=True,
+    allow_methods=["*"],  # or ["POST", "GET", "OPTIONS"]
+    allow_headers=["*"],
+)
 
 class SimulationParams(BaseModel):
     place: str = "Linz, Austria"
@@ -13,11 +23,12 @@ class SimulationParams(BaseModel):
     latent_period: int = 120
     recovery_period: int = 168
     death_rate: float = 0.01
+    total_days: int = 90
 
 model = None
 
 @app.post("/api/simulation/initialize")
-async def start_simulation(params):
+async def start_simulation(params: SimulationParams):
     """Start a new simulation."""
     global model
     model = DiseaseSpreadModel(params.place, params.infection_prob, params.distance_threshold,

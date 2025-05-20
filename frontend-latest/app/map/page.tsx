@@ -25,20 +25,37 @@ import { env } from "@/lib/env"
 import { useSimulation } from "@/context/simulation-context"
 import { useRouter } from "next/navigation"
 import { Slider } from "@/components/ui/slider"
-import { Slider as SliderPrimitive } from "@/components/ui/slider"
+import { PollingRateControl } from "@/components/polling-rate-control"
 
-interface Agent {
-  id: string
-  name: string
-  age: number
+// Define agent marker interface
+interface AgentMarker {
+  id: number
   status: "healthy" | "infected" | "recovered" | "deceased"
+  age: number
   location: [number, number]
-  destination: [number, number]
-  path: [number, number][]
-  destinationName: string
-  infectedDay?: number
   marker?: mapboxgl.Marker
   visible?: boolean
+}
+
+// Define a type for agent feature properties
+interface AgentProperties {
+  id: number
+  state?: string
+  age?: number
+  [key: string]: any
+}
+
+// Define a type for agent feature geometry
+interface AgentGeometry {
+  type: string
+  coordinates: [number, number]
+}
+
+// Define a type for agent feature
+interface AgentFeature {
+  type: string
+  properties: AgentProperties
+  geometry: AgentGeometry
 }
 
 export default function MapView() {
@@ -55,251 +72,171 @@ export default function MapView() {
   const [isGlobeView, setIsGlobeView] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
   const animationRef = useRef<number | null>(null)
-  const agentsRef = useRef<Agent[]>([])
-  const isInitializedRef = useRef<boolean>(false)
+  const agentsRef = useRef<Map<number, AgentMarker>>(new Map()) // Changed to Map for efficient lookups
   const mapInitializedRef = useRef<boolean>(false)
   const currentZoomRef = useRef<number>(14)
+  const heatmapInitializedRef = useRef<boolean>(false)
+  const [mapLoadAttempted, setMapLoadAttempted] = useState(false)
 
+  // Convert agent state to status
+  const getStatusFromState = (state: string): "healthy" | "infected" | "recovered" | "deceased" => {
+    switch (state) {
+      case "I":
+        return "infected"
+      case "R":
+        return "recovered"
+      case "D":
+        return "deceased"
+      case "E":
+        return "infected" // Treat exposed as infected for visualization
+      case "S":
+      default:
+        return "healthy"
+    }
+  }
+
+  // Generate heatmap data from agents
   const generateHeatmapData = useCallback(() => {
-    if (!map.current || !isSimulationActive() || agentsRef.current.length === 0) return null
+    try {
+      if (!map.current || !isSimulationActive() || !simulation.currentStepData) {
+        return {
+          type: "FeatureCollection",
+          features: [],
+        }
+      }
 
-    const features = []
-    for (const agent of agentsRef.current) {
-      if (agent.status === "infected" && agent.visible !== false) {
-        features.push({
-          type: "Feature",
-          properties: { intensity: 1 },
-          geometry: { type: "Point", coordinates: agent.location },
-        })
+      const features = []
+      const agents = simulation.currentStepData.agents?.features || []
+      const infectedAgents = agents.filter((agent) => {
+        if (!agent?.properties?.state) return false
+        const state = agent.properties.state
+        return state === "I" || state === "E"
+      })
 
-        for (let i = 0; i < 5; i++) {
-          const offsetLng = (Math.random() - 0.5) * 0.01
-          const offsetLat = (Math.random() - 0.5) * 0.01
+      for (const agent of infectedAgents) {
+        if (!agent.geometry?.coordinates) continue
+
+        try {
+          const [lng, lat] = agent.geometry.coordinates
+
+          // Validate coordinates
+          if (
+            typeof lng !== "number" ||
+            typeof lat !== "number" ||
+            isNaN(lng) ||
+            isNaN(lat) ||
+            !isFinite(lng) ||
+            !isFinite(lat)
+          ) {
+            continue
+          }
+
           features.push({
             type: "Feature",
-            properties: { intensity: 0.5 },
-            geometry: {
-              coordinates: [agent.location[0] + offsetLng, agent.location[1] + offsetLat],
-              type: "Point",
-            },
+            properties: { intensity: 1 },
+            geometry: { type: "Point", coordinates: [lng, lat] },
           })
+
+          // Add some random points around infected agents for better heatmap visualization
+          for (let i = 0; i < 5; i++) {
+            const offsetLng = (Math.random() - 0.5) * 0.01
+            const offsetLat = (Math.random() - 0.5) * 0.01
+            features.push({
+              type: "Feature",
+              properties: { intensity: 0.5 },
+              geometry: {
+                coordinates: [lng + offsetLng, lat + offsetLat],
+                type: "Point",
+              },
+            })
+          }
+        } catch (error) {
+          console.error("Error processing agent for heatmap:", error)
         }
       }
+
+      return { type: "FeatureCollection", features }
+    } catch (error) {
+      console.error("Error generating heatmap data:", error)
+      return {
+        type: "FeatureCollection",
+        features: [],
+      }
     }
+  }, [isSimulationActive, simulation.currentStepData])
 
-    return { type: "FeatureCollection", features }
-  }, [isSimulationActive])
-
+  // Update agent visibility based on zoom level
   const updateAgentVisibility = useCallback(
     (zoom: number) => {
-      if (!map.current || agentsRef.current.length === 0) return
+      try {
+        if (!map.current || agentsRef.current.size === 0) return
 
-      const cityZoom = 10
-      const regionZoom = 6
-      const countryZoom = 4
-      let visibilityPercentage = 1.0
+        const cityZoom = 10
+        const regionZoom = 6
+        const countryZoom = 4
+        let visibilityPercentage = 1.0
 
-      if (zoom < cityZoom && zoom >= regionZoom) {
-        visibilityPercentage = 0.5 + ((zoom - regionZoom) / (cityZoom - regionZoom)) * 0.5
-      } else if (zoom < regionZoom && zoom >= countryZoom) {
-        visibilityPercentage = 0.1 + ((zoom - countryZoom) / (regionZoom - countryZoom)) * 0.4
-      } else if (zoom < countryZoom) {
-        visibilityPercentage = Math.max(0.05, (zoom / countryZoom) * 0.1)
-      }
-
-      const totalAgents = agentsRef.current.length
-      const agentsToShow = Math.max(5, Math.floor(totalAgents * visibilityPercentage))
-      const center = map.current.getCenter()
-
-      const sortedAgents = [...agentsRef.current].sort((a, b) => {
-        if (a.status === "infected" && b.status !== "infected") return -1
-        if (a.status !== "infected" && b.status === "infected") return 1
-        const distA = Math.pow(a.location[0] - center.lng, 2) + Math.pow(a.location[1] - center.lat, 2)
-        const distB = Math.pow(b.location[0] - center.lng, 2) + Math.pow(b.location[1] - center.lat, 2)
-        return distA - distB
-      })
-
-      agentsRef.current.forEach((agent, index) => {
-        const shouldBeVisible = index < agentsToShow
-        agent.visible = shouldBeVisible
-        if (agent.marker) {
-          agent.marker.getElement().style.display = shouldBeVisible ? "block" : "none"
+        if (zoom < cityZoom && zoom >= regionZoom) {
+          visibilityPercentage = 0.5 + ((zoom - regionZoom) / (cityZoom - regionZoom)) * 0.5
+        } else if (zoom < regionZoom && zoom >= countryZoom) {
+          visibilityPercentage = 0.1 + ((zoom - countryZoom) / (regionZoom - countryZoom)) * 0.4
+        } else if (zoom < countryZoom) {
+          visibilityPercentage = Math.max(0.05, (zoom / countryZoom) * 0.1)
         }
-      })
 
-      const newHeatmapData = generateHeatmapData()
-      if (newHeatmapData && map.current.getSource("infection-heatmap")) {
-        ;(map.current.getSource("infection-heatmap") as mapboxgl.GeoJSONSource).setData(newHeatmapData)
-      }
-    },
-    [generateHeatmapData],
-  )
+        const totalAgents = agentsRef.current.size
+        const agentsToShow = Math.max(5, Math.floor(totalAgents * visibilityPercentage))
+        const center = map.current.getCenter()
 
-  const updateAgentPositions = useCallback(
-    (day: number) => {
-      if (!map.current || agentsRef.current.length === 0) return
+        // Prioritize infected agents and those closer to the center
+        const sortedAgents = Array.from(agentsRef.current.values()).sort((a, b) => {
+          if (a.status === "infected" && b.status !== "infected") return -1
+          if (a.status !== "infected" && b.status === "infected") return 1
+          const distA = Math.pow(a.location[0] - center.lng, 2) + Math.pow(a.location[1] - center.lat, 2)
+          const distB = Math.pow(b.location[0] - center.lng, 2) + Math.pow(b.location[1] - center.lat, 2)
+          return distA - distB
+        })
 
-      agentsRef.current.forEach((agent, index) => {
-        if (!agent.marker) return
-        const pathIndex = Math.min(day - 1, agent.path.length - 1)
-        const position = agent.path[pathIndex]
-        agent.marker.setLngLat(position)
-
-        const el = agent.marker.getElement()
-
-        // Use deterministic approach based on agent ID and day for consistency
-        if (agent.status === "healthy") {
-          const infectionSeed = (index * 13 + day * 7) % 100
-          if (infectionSeed < (5 * day) / maxDay && infectionSeed < 30) {
-            agent.status = "infected"
-            agent.infectedDay = day
-            el.style.backgroundColor = "#F56E0F"
-            el.style.boxShadow = "0 0 10px #F56E0F"
-          }
-        } else if (agent.status === "infected") {
-          const recoverySeed = (index * 11 + day * 5) % 100
-          const daysSinceInfection = day - (agent.infectedDay || 0)
-          if (daysSinceInfection > 7 && recoverySeed < 20) {
-            const fatalitySeed = (index * 7 + day * 3) % 100
-            if (fatalitySeed < 15) {
-              agent.status = "deceased"
-              el.style.backgroundColor = "#878787"
-              el.style.boxShadow = "none"
-            } else {
-              agent.status = "recovered"
-              el.style.backgroundColor = "#4b607f"
-              el.style.boxShadow = "none"
+        sortedAgents.forEach((agent, index) => {
+          try {
+            const shouldBeVisible = index < agentsToShow
+            agent.visible = shouldBeVisible
+            if (agent.marker) {
+              const el = agent.marker.getElement()
+              if (el) {
+                el.style.display = shouldBeVisible ? "block" : "none"
+              }
             }
+          } catch (error) {
+            console.error("Error updating agent visibility:", error)
+          }
+        })
+
+        // Update heatmap if enabled
+        if (showHeatmap && heatmapInitializedRef.current) {
+          try {
+            const newHeatmapData = generateHeatmapData()
+            if (map.current && map.current.getSource("infection-heatmap")) {
+              ;(map.current.getSource("infection-heatmap") as mapboxgl.GeoJSONSource).setData(newHeatmapData)
+            }
+          } catch (error) {
+            console.error("Error updating heatmap:", error)
           }
         }
-      })
-
-      const newHeatmapData = generateHeatmapData()
-      if (newHeatmapData && map.current.getSource("infection-heatmap")) {
-        ;(map.current.getSource("infection-heatmap") as mapboxgl.GeoJSONSource).setData(newHeatmapData)
+      } catch (error) {
+        console.error("Error in updateAgentVisibility:", error)
       }
     },
-    [generateHeatmapData, maxDay],
+    [generateHeatmapData, showHeatmap],
   )
 
-  const addAgentsToMap = useCallback(() => {
-    if (!map.current || agentsRef.current.length === 0) return
-
-    agentsRef.current.forEach((agent) => {
-      if (agent.marker) return
-
-      const el = document.createElement("div")
-      el.className = "agent-marker"
-      el.style.cssText = `
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        transition: all 0.5s ease;
-        background-color: ${
-          agent.status === "healthy"
-            ? "#FFFFFF"
-            : agent.status === "infected"
-              ? "#F56E0F"
-              : agent.status === "recovered"
-                ? "#4b607f"
-                : "#878787"
-        };
-        ${agent.status === "infected" ? "box-shadow: 0 0 10px #F56E0F;" : ""}
-      `
-
-      // No click event listener - agents are not clickable anymore
-
-      agent.marker = new mapboxgl.Marker(el).setLngLat(agent.location).addTo(map.current)
-    })
-
-    if (map.current) {
-      updateAgentVisibility(map.current.getZoom())
-    }
-  }, [updateAgentVisibility])
-
+  // Initialize map only once
   useEffect(() => {
-    if (!isSimulationActive() || agentsRef.current.length > 0) return
-
-    // Generate random coordinates around the center
-    const generateRandomCoordinate = (center: [number, number], radius: number): [number, number] => {
-      const angle = Math.random() * Math.PI * 2
-      const distance = Math.random() * radius
-      const lat = center[1] + distance * Math.cos(angle) * 0.01
-      const lng = center[0] + distance * Math.sin(angle) * 0.01
-      return [lng, lat]
+    if (!mapContainer.current || mapInitializedRef.current || mapLoadAttempted) {
+      return
     }
 
-    // Generate random path between two points
-    const generatePath = (start: [number, number], end: [number, number], points: number): [number, number][] => {
-      const path: [number, number][] = [start]
-
-      for (let i = 1; i < points; i++) {
-        const ratio = i / points
-        const lat = start[1] + (end[1] - start[1]) * ratio + (Math.random() - 0.5) * 0.002
-        const lng = start[0] + (end[0] - start[0]) * ratio + (Math.random() - 0.5) * 0.002
-        path.push([lng, lat])
-      }
-
-      path.push(end)
-      return path
-    }
-
-    const names = [
-      "John Doe",
-      "Jane Smith",
-      "Bob Johnson",
-      "Alice Brown",
-      "Charlie Davis",
-      "Diana Evans",
-      "Edward Foster",
-      "Fiona Grant",
-      "George Harris",
-      "Hannah Irving",
-    ]
-
-    const destinations = [
-      "Work",
-      "Grocery Store",
-      "Home",
-      "Hospital",
-      "School",
-      "Park",
-      "Restaurant",
-      "Gym",
-      "Mall",
-      "Library",
-    ]
-
-    const agents: Agent[] = []
-    const center = simulation.coordinates
-
-    for (let i = 0; i < 20; i++) {
-      const status = i < 3 ? "infected" : i < 15 ? "healthy" : i < 18 ? "recovered" : "deceased"
-      const location = generateRandomCoordinate(center, 5)
-      const destination = generateRandomCoordinate(center, 5)
-      const path = generatePath(location, destination, 10)
-
-      agents.push({
-        id: `agent-${i}`,
-        name: names[i % names.length],
-        age: 20 + Math.floor(Math.random() * 60),
-        status,
-        location,
-        destination,
-        path,
-        destinationName: destinations[i % destinations.length],
-        infectedDay: status === "infected" ? Math.floor(Math.random() * 5) + 1 : undefined,
-        visible: true,
-      })
-    }
-
-    agentsRef.current = agents
-    isInitializedRef.current = true
-  }, [isSimulationActive, simulation.coordinates])
-
-  // Fixed map initialization useEffect
-  useEffect(() => {
-    if (!mapContainer.current || !isSimulationActive() || mapInitializedRef.current) return
+    setMapLoadAttempted(true)
 
     if (!env.MAPBOX_TOKEN) {
       setMapError(true)
@@ -307,40 +244,59 @@ export default function MapView() {
     }
 
     try {
-      mapboxgl.accessToken = env.MAPBOX_TOKEN || "pk.dummy.token"
+      mapboxgl.accessToken = env.MAPBOX_TOKEN
+
+      const defaultCoordinates: [number, number] = [0, 0]
+      const coordinates = simulation.coordinates || defaultCoordinates
+
+      // Validate coordinates
+      if (
+        !Array.isArray(coordinates) ||
+        coordinates.length !== 2 ||
+        typeof coordinates[0] !== "number" ||
+        typeof coordinates[1] !== "number" ||
+        isNaN(coordinates[0]) ||
+        isNaN(coordinates[1]) ||
+        !isFinite(coordinates[0]) ||
+        !isFinite(coordinates[1])
+      ) {
+        console.error("Invalid coordinates:", coordinates)
+        setMapError(true)
+        return
+      }
 
       map.current = new mapboxgl.Map({
         container: mapContainer.current,
         style: "mapbox://styles/mapbox/dark-v11",
-        center: simulation.coordinates,
+        center: coordinates,
         zoom: 14,
       })
 
       map.current.on("load", () => {
+        if (!map.current) return
+
         // Add resize handler to ensure map fills container
         const resizeMap = () => {
           if (map.current) {
-            map.current.resize()
+            try {
+              map.current.resize()
+            } catch (error) {
+              console.error("Error resizing map:", error)
+            }
           }
         }
 
         // Add resize event listener
         window.addEventListener("resize", resizeMap)
 
-        setMapLoaded(true)
-        mapInitializedRef.current = true
-
-        if (map.current) {
-          // Generate initial heatmap data
-          const initialHeatmapData = generateHeatmapData() || {
-            type: "FeatureCollection",
-            features: [],
-          }
-
-          // Add heatmap source
+        try {
+          // Add heatmap source and layer
           map.current.addSource("infection-heatmap", {
             type: "geojson",
-            data: initialHeatmapData,
+            data: {
+              type: "FeatureCollection",
+              features: [],
+            },
           })
 
           // Add heatmap layer
@@ -381,32 +337,38 @@ export default function MapView() {
             "waterway-label",
           )
           map.current.setLayoutProperty("infection-heat", "visibility", "none")
+          heatmapInitializedRef.current = true
+        } catch (error) {
+          console.error("Error initializing heatmap:", error)
+          heatmapInitializedRef.current = false
+        }
 
-          // Add agents to the map
-          addAgentsToMap()
-
-          // Update agent positions for day 1
-          updateAgentPositions(1)
-
+        if (map.current) {
           map.current.on("zoom", () => {
             if (!map.current) return
-            const zoom = map.current.getZoom()
-            if (Math.abs(zoom - currentZoomRef.current) > 0.5) {
-              currentZoomRef.current = zoom
-              updateAgentVisibility(zoom)
+            try {
+              const zoom = map.current.getZoom()
+              if (Math.abs(zoom - currentZoomRef.current) > 0.5) {
+                currentZoomRef.current = zoom
+                updateAgentVisibility(zoom)
+              }
+            } catch (error) {
+              console.error("Error in zoom handler:", error)
             }
           })
         }
 
-        // Add to cleanup function
+        setMapLoaded(true)
+        mapInitializedRef.current = true
+
         return () => {
           window.removeEventListener("resize", resizeMap)
-          if (map.current) {
-            map.current.remove()
-            map.current = null
-            mapInitializedRef.current = false
-          }
         }
+      })
+
+      map.current.on("error", (e) => {
+        console.error("Mapbox error:", e)
+        setMapError(true)
       })
     } catch (error) {
       setMapError(true)
@@ -414,111 +376,417 @@ export default function MapView() {
     }
 
     return () => {
-      if (map.current) {
-        map.current.remove()
-        map.current = null
-        mapInitializedRef.current = false
+      // Don't remove the map on component unmount to prevent flickering
+      // We'll handle cleanup in a separate effect
+    }
+  }, [simulation.coordinates, updateAgentVisibility])
+
+  // Cleanup map on final unmount
+  useEffect(() => {
+    return () => {
+      try {
+        if (map.current) {
+          map.current.remove()
+          map.current = null
+          mapInitializedRef.current = false
+          heatmapInitializedRef.current = false
+        }
+      } catch (error) {
+        console.error("Error cleaning up map:", error)
       }
     }
+  }, [])
+
+  // Update agent positions when simulation data changes
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return
+    if (!simulation.currentStepData?.agents?.features) return
+
+    try {
+      const currentAgents = simulation.currentStepData.agents.features
+      const currentAgentIds = new Set<number>()
+
+      // Update existing markers and create new ones
+      currentAgents.forEach((feature: AgentFeature) => {
+        try {
+          if (!feature.properties || !feature.geometry?.coordinates) return
+
+          const id = feature.properties.id
+          if (id === undefined) return
+
+          // Validate coordinates
+          const [lng, lat] = feature.geometry.coordinates
+          if (
+            typeof lng !== "number" ||
+            typeof lat !== "number" ||
+            isNaN(lng) ||
+            isNaN(lat) ||
+            !isFinite(lng) ||
+            !isFinite(lat)
+          ) {
+            console.warn("Invalid coordinates for agent:", id, feature.geometry.coordinates)
+            return
+          }
+
+          currentAgentIds.add(id)
+          const state = feature.properties.state || "S"
+          const status = getStatusFromState(state)
+
+          // Default age to 30 if not provided
+          const age = typeof feature.properties.age === "number" ? feature.properties.age : 30
+
+          if (agentsRef.current.has(id)) {
+            // Update existing marker
+            const agent = agentsRef.current.get(id)!
+            agent.status = status
+            agent.location = [lng, lat]
+            agent.age = age // Update age in case it changed
+
+            // Update marker position
+            if (agent.marker) {
+              agent.marker.setLngLat([lng, lat])
+
+              // Update marker style based on status
+              try {
+                const el = agent.marker.getElement()
+                if (el) {
+                  el.style.backgroundColor =
+                    status === "healthy"
+                      ? "#FFFFFF"
+                      : status === "infected"
+                        ? "#F56E0F"
+                        : status === "recovered"
+                          ? "#4b607f"
+                          : "#878787"
+
+                  el.style.boxShadow = status === "infected" ? "0 0 10px #F56E0F" : "none"
+                }
+              } catch (styleError) {
+                console.error("Error updating marker style:", styleError)
+              }
+            }
+          } else {
+            // Create new marker
+            try {
+              const el = document.createElement("div")
+              el.className = "agent-marker"
+              el.style.cssText = `
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                transition: all 0.5s ease;
+                background-color: ${
+                  status === "healthy"
+                    ? "#FFFFFF"
+                    : status === "infected"
+                      ? "#F56E0F"
+                      : status === "recovered"
+                        ? "#4b607f"
+                        : "#878787"
+                };
+                ${status === "infected" ? "box-shadow: 0 0 10px #F56E0F;" : ""}
+              `
+
+              const marker = new mapboxgl.Marker(el).setLngLat([lng, lat]).addTo(map.current)
+
+              agentsRef.current.set(id, {
+                id,
+                status,
+                age,
+                location: [lng, lat],
+                marker,
+                visible: true,
+              })
+            } catch (markerError) {
+              console.error("Error creating marker:", markerError)
+            }
+          }
+        } catch (agentError) {
+          console.error("Error processing agent:", agentError)
+        }
+      })
+
+      // Remove markers that no longer exist
+      for (const [id, agent] of agentsRef.current.entries()) {
+        try {
+          if (!currentAgentIds.has(id) && agent.marker) {
+            agent.marker.remove()
+            agentsRef.current.delete(id)
+          }
+        } catch (removeError) {
+          console.error("Error removing marker:", removeError)
+        }
+      }
+
+      // Update agent visibility based on current zoom
+      if (map.current) {
+        try {
+          updateAgentVisibility(map.current.getZoom())
+        } catch (visibilityError) {
+          console.error("Error updating agent visibility:", visibilityError)
+        }
+      }
+
+      // Update heatmap if enabled
+      if (showHeatmap && heatmapInitializedRef.current && map.current) {
+        try {
+          const heatmapData = generateHeatmapData()
+          if (map.current.getSource("infection-heatmap")) {
+            ;(map.current.getSource("infection-heatmap") as mapboxgl.GeoJSONSource).setData(heatmapData)
+          }
+        } catch (error) {
+          console.error("Error updating heatmap data:", error)
+        }
+      }
+
+      // Update day and max day
+      const currentStep = simulation.currentStepData.step || 0
+      setSimulationDay(Math.floor(currentStep / 24) + 1)
+      setMaxDay(Math.max(1, Math.ceil((simulation.progress / 100) * 30))) // Assuming 30 days max, minimum 1
+    } catch (error) {
+      console.error("Error updating agent positions:", error)
+    }
   }, [
-    isSimulationActive,
-    simulation.coordinates,
-    addAgentsToMap,
-    updateAgentPositions,
+    mapLoaded,
+    simulation.currentStepData,
     updateAgentVisibility,
     generateHeatmapData,
+    showHeatmap,
+    simulation.progress,
   ])
 
   // Add a resize observer to handle container size changes
   useEffect(() => {
     if (!mapContainer.current || !map.current) return
 
-    const resizeObserver = new ResizeObserver(() => {
-      if (map.current) {
-        map.current.resize()
-      }
-    })
+    try {
+      const resizeObserver = new ResizeObserver(() => {
+        if (map.current) {
+          try {
+            map.current.resize()
+          } catch (error) {
+            console.error("Error resizing map:", error)
+          }
+        }
+      })
 
-    resizeObserver.observe(mapContainer.current)
+      resizeObserver.observe(mapContainer.current)
 
-    return () => {
-      if (mapContainer.current) {
-        resizeObserver.unobserve(mapContainer.current)
+      return () => {
+        try {
+          if (mapContainer.current) {
+            resizeObserver.unobserve(mapContainer.current)
+          }
+        } catch (error) {
+          console.error("Error removing resize observer:", error)
+        }
       }
+    } catch (error) {
+      console.error("Error setting up resize observer:", error)
     }
   }, [mapLoaded])
 
   // Map control functions
   const handleZoomIn = useCallback(() => {
-    if (map.current) {
-      map.current.zoomIn()
+    try {
+      if (map.current) {
+        map.current.zoomIn()
+      }
+    } catch (error) {
+      console.error("Error zooming in:", error)
     }
   }, [])
 
   const handleZoomOut = useCallback(() => {
-    if (map.current) {
-      map.current.zoomOut()
+    try {
+      if (map.current) {
+        map.current.zoomOut()
+      }
+    } catch (error) {
+      console.error("Error zooming out:", error)
     }
   }, [])
 
   const handleResetNorth = useCallback(() => {
-    if (map.current) {
-      map.current.setBearing(0)
+    try {
+      if (map.current) {
+        map.current.setBearing(0)
+      }
+    } catch (error) {
+      console.error("Error resetting north:", error)
     }
   }, [])
 
   const handleRecenterMap = useCallback(() => {
-    if (map.current) {
-      map.current.flyTo({
-        center: simulation.coordinates,
-        zoom: 14,
-        pitch: 0,
-        bearing: 0,
-        duration: 1500,
-      })
+    try {
+      if (map.current) {
+        const coordinates = simulation.coordinates || [0, 0]
+
+        // Validate coordinates
+        if (
+          !Array.isArray(coordinates) ||
+          coordinates.length !== 2 ||
+          typeof coordinates[0] !== "number" ||
+          typeof coordinates[1] !== "number" ||
+          isNaN(coordinates[0]) ||
+          isNaN(coordinates[1]) ||
+          !isFinite(coordinates[0]) ||
+          !isFinite(coordinates[1])
+        ) {
+          console.error("Invalid coordinates for recentering:", coordinates)
+          return
+        }
+
+        map.current.flyTo({
+          center: coordinates,
+          zoom: 14,
+          pitch: 0,
+          bearing: 0,
+          duration: 1500,
+        })
+      }
+    } catch (error) {
+      console.error("Error recentering map:", error)
     }
   }, [simulation.coordinates])
 
   const handleToggleHeatmap = useCallback(() => {
-    if (map.current) {
+    try {
+      if (!map.current) return
+
       const visibility = !showHeatmap
-      map.current.setLayoutProperty("infection-heat", "visibility", visibility ? "visible" : "none")
+
+      if (heatmapInitializedRef.current) {
+        try {
+          map.current.setLayoutProperty("infection-heat", "visibility", visibility ? "visible" : "none")
+
+          if (visibility) {
+            const heatmapData = generateHeatmapData()
+            if (map.current.getSource("infection-heatmap")) {
+              ;(map.current.getSource("infection-heatmap") as mapboxgl.GeoJSONSource).setData(heatmapData)
+            }
+          }
+        } catch (error) {
+          console.error("Error toggling existing heatmap:", error)
+          heatmapInitializedRef.current = false
+        }
+      }
+
+      // If heatmap isn't initialized or failed, try to initialize it
+      if (!heatmapInitializedRef.current && visibility) {
+        try {
+          // Check if the source already exists
+          if (!map.current.getSource("infection-heatmap")) {
+            map.current.addSource("infection-heatmap", {
+              type: "geojson",
+              data: generateHeatmapData(),
+            })
+          }
+
+          // Check if the layer already exists
+          if (!map.current.getLayer("infection-heat")) {
+            map.current.addLayer(
+              {
+                id: "infection-heat",
+                type: "heatmap",
+                source: "infection-heatmap",
+                paint: {
+                  "heatmap-weight": ["get", "intensity"],
+                  "heatmap-intensity": 1,
+                  "heatmap-color": [
+                    "interpolate",
+                    ["linear"],
+                    ["heatmap-density"],
+                    0,
+                    "rgba(0, 0, 255, 0)",
+                    0.2,
+                    "rgba(0, 0, 255, 0.5)",
+                    0.4,
+                    "rgba(0, 255, 255, 0.7)",
+                    0.6,
+                    "rgba(255, 255, 0, 0.8)",
+                    0.8,
+                    "rgba(255, 0, 0, 0.9)",
+                    1,
+                    "rgba(255, 0, 0, 1)",
+                  ],
+                  "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 2, 9, 20],
+                  "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 7, 1, 9, 0.5],
+                },
+              },
+              "waterway-label",
+            )
+          }
+
+          map.current.setLayoutProperty("infection-heat", "visibility", "visible")
+          heatmapInitializedRef.current = true
+        } catch (error) {
+          console.error("Error initializing heatmap on toggle:", error)
+          heatmapInitializedRef.current = false
+        }
+      }
+
       setShowHeatmap(visibility)
+    } catch (error) {
+      console.error("Error toggling heatmap:", error)
     }
-  }, [showHeatmap])
+  }, [showHeatmap, generateHeatmapData])
 
   // Toggle globe view
   const toggleGlobeView = useCallback(() => {
-    if (!map.current) return
+    try {
+      if (!map.current) return
 
-    if (isGlobeView) {
-      // Zoom back to location
-      map.current.flyTo({
-        center: simulation.coordinates,
-        zoom: 14,
-        duration: 2000,
-      })
-    } else {
-      // Zoom out to globe view
-      map.current.flyTo({
-        center: [0, 20], // Center on equator
-        zoom: 1,
-        duration: 2000,
-      })
+      if (isGlobeView) {
+        // Zoom back to location
+        const coordinates = simulation.coordinates || [0, 0]
+
+        // Validate coordinates
+        if (
+          !Array.isArray(coordinates) ||
+          coordinates.length !== 2 ||
+          typeof coordinates[0] !== "number" ||
+          typeof coordinates[1] !== "number" ||
+          isNaN(coordinates[0]) ||
+          isNaN(coordinates[1]) ||
+          !isFinite(coordinates[0]) ||
+          !isFinite(coordinates[1])
+        ) {
+          console.error("Invalid coordinates for globe view:", coordinates)
+          return
+        }
+
+        map.current.flyTo({
+          center: coordinates,
+          zoom: 14,
+          duration: 2000,
+        })
+      } else {
+        // Zoom out to globe view
+        map.current.flyTo({
+          center: [0, 20], // Center on equator
+          zoom: 1,
+          duration: 2000,
+        })
+      }
+
+      setIsGlobeView(!isGlobeView)
+    } catch (error) {
+      console.error("Error toggling globe view:", error)
     }
-
-    setIsGlobeView(!isGlobeView)
   }, [isGlobeView, simulation.coordinates])
 
   // Add a function to handle progress bar dragging
-  const handleDayChange = useCallback(
-    (value: number[]) => {
+  const handleDayChange = useCallback((value: number[]) => {
+    try {
       const newDay = value[0]
       setSimulationDay(newDay)
-      updateAgentPositions(newDay)
-    },
-    [updateAgentPositions],
-  )
+      // Note: We can't actually change the simulation step from here
+      // as the backend doesn't support jumping to specific steps
+    } catch (error) {
+      console.error("Error changing day:", error)
+    }
+  }, [])
 
   // Animation logic
   useEffect(() => {
@@ -527,21 +795,25 @@ export default function MapView() {
       const frameDuration = 1000 / playSpeed // ms per day
 
       const animate = (time: number) => {
-        if (time - lastTime >= frameDuration) {
-          lastTime = time
-          setSimulationDay((prev) => {
-            if (prev >= maxDay) {
-              setIsPlaying(false)
-              return maxDay
-            }
-            const newDay = prev + 1
-            updateAgentPositions(newDay)
-            return newDay
-          })
-        }
+        try {
+          if (time - lastTime >= frameDuration) {
+            lastTime = time
+            setSimulationDay((prev) => {
+              if (prev >= maxDay) {
+                setIsPlaying(false)
+                return maxDay
+              }
+              return prev + 1
+            })
+          }
 
-        if (simulationDay < maxDay) {
-          animationRef.current = requestAnimationFrame(animate)
+          // Use latest simulationDay from state
+          if (simulationDay < maxDay) {
+            animationRef.current = requestAnimationFrame(animate)
+          }
+        } catch (error) {
+          console.error("Error in animation frame:", error)
+          setIsPlaying(false)
         }
       }
 
@@ -554,7 +826,7 @@ export default function MapView() {
         animationRef.current = null
       }
     }
-  }, [isPlaying, simulationDay, maxDay, playSpeed, isSimulationActive, updateAgentPositions])
+  }, [isPlaying, playSpeed, maxDay, isSimulationActive, simulationDay])
 
   const handlePlayPause = useCallback(() => {
     setIsPlaying(!isPlaying)
@@ -563,37 +835,58 @@ export default function MapView() {
   const handleReset = useCallback(() => {
     setIsPlaying(false)
     setSimulationDay(1)
-    updateAgentPositions(1)
-  }, [updateAgentPositions])
+  }, [])
 
   const handleSkipForward = useCallback(() => {
     const newDay = Math.min(simulationDay + 1, maxDay)
     setSimulationDay(newDay)
-    updateAgentPositions(newDay)
-  }, [simulationDay, maxDay, updateAgentPositions])
+  }, [simulationDay, maxDay])
 
   const handleSkipBack = useCallback(() => {
     const newDay = Math.max(simulationDay - 1, 1)
     setSimulationDay(newDay)
-    updateAgentPositions(newDay)
-  }, [simulationDay, updateAgentPositions])
+  }, [simulationDay])
 
   const handleStartSimulation = useCallback(() => {
     router.push("/")
   }, [router])
 
-  // Calculate stats based on agents
-  const stats = useMemo(
-    () => ({
+  // Calculate stats based on current simulation data - use the simulation state directly
+  const stats = useMemo(() => {
+    return {
       day: simulationDay,
-      totalAgents: agentsRef.current.length,
-      healthyAgents: agentsRef.current.filter((a) => a.status === "healthy").length,
-      infectedAgents: agentsRef.current.filter((a) => a.status === "infected").length,
-      recoveredAgents: agentsRef.current.filter((a) => a.status === "recovered").length,
-      deceasedAgents: agentsRef.current.filter((a) => a.status === "deceased").length,
-    }),
-    [simulationDay],
-  )
+      totalAgents: simulation.totalAgents,
+      healthyAgents: simulation.healthyAgents,
+      infectedAgents: simulation.infectedAgents + simulation.exposedAgents, // Combine exposed and infected
+      recoveredAgents: simulation.recoveredAgents,
+      deceasedAgents: simulation.deadAgents,
+    }
+  }, [
+    simulationDay,
+    simulation.totalAgents,
+    simulation.healthyAgents,
+    simulation.infectedAgents,
+    simulation.exposedAgents,
+    simulation.recoveredAgents,
+    simulation.deadAgents,
+  ])
+
+  // Function to retry map initialization
+  const handleRetryMapInit = useCallback(() => {
+    try {
+      setMapError(false)
+      setMapLoadAttempted(false)
+      mapInitializedRef.current = false
+      heatmapInitializedRef.current = false
+
+      if (map.current) {
+        map.current.remove()
+        map.current = null
+      }
+    } catch (error) {
+      console.error("Error retrying map initialization:", error)
+    }
+  }, [])
 
   return (
     <div className="flex min-h-screen">
@@ -619,13 +912,16 @@ export default function MapView() {
             <div className="flex flex-col space-y-4 sm:space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                 <h1 className="text-2xl font-bold text-white gradient-text font-serif">Map View</h1>
-                <Button
-                  variant="outline"
-                  className="bg-transparent border-line-gray text-white hover:bg-accent-blue/20"
-                  onClick={toggleGlobeView}
-                >
-                  <Globe className="h-5 w-5" />
-                </Button>
+                <div className="flex items-center gap-4">
+                  <PollingRateControl />
+                  <Button
+                    variant="outline"
+                    className="bg-transparent border-line-gray text-white hover:bg-accent-blue/20"
+                    onClick={toggleGlobeView}
+                  >
+                    <Globe className="h-5 w-5" />
+                  </Button>
+                </div>
               </div>
 
               {/* Increased height map container */}
@@ -633,15 +929,27 @@ export default function MapView() {
                 {mapError ? (
                   <div className="flex flex-col items-center justify-center h-full">
                     <AlertCircle className="h-12 w-12 text-accent-orange mb-4" />
-                    <h3 className="text-xl font-medium text-white mb-2">Mapbox API Key Required</h3>
-                    <p className="text-line-gray text-center max-w-md">
-                      To use the map feature, please add your Mapbox API key as an environment variable named
-                      NEXT_PUBLIC_MAPBOX_TOKEN. You can get one by signing up at{" "}
-                      <a href="https://mapbox.com" className="text-accent-orange hover:underline">
-                        mapbox.com
-                      </a>
-                      .
+                    <h3 className="text-xl font-medium text-white mb-2">Map Error</h3>
+                    <p className="text-line-gray text-center max-w-md mb-6">
+                      {!env.MAPBOX_TOKEN ? (
+                        <>
+                          To use the map feature, please add your Mapbox API key as an environment variable named
+                          NEXT_PUBLIC_MAPBOX_TOKEN. You can get one by signing up at{" "}
+                          <a href="https://mapbox.com" className="text-accent-orange hover:underline">
+                            mapbox.com
+                          </a>
+                          .
+                        </>
+                      ) : (
+                        "There was an error loading the map. This could be due to invalid coordinates or a network issue."
+                      )}
                     </p>
+                    <Button
+                      className="bg-accent-orange hover:bg-accent-orange/90 text-white"
+                      onClick={handleRetryMapInit}
+                    >
+                      Retry
+                    </Button>
                   </div>
                 ) : (
                   <div className="w-full h-full overflow-hidden relative">
@@ -766,10 +1074,10 @@ export default function MapView() {
                   </div>
 
                   <div className="relative">
-                    <SliderPrimitive
+                    <Slider
                       value={[simulationDay]}
                       min={1}
-                      max={maxDay}
+                      max={Math.max(1, maxDay)}
                       step={1}
                       onValueChange={handleDayChange}
                       className="w-full"
