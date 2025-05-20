@@ -94,6 +94,7 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
         }
 
         // Reset all simulation data
+        // Reset all simulation data
         setSimulation({
           ...initialState,
           status: "initializing",
@@ -108,9 +109,22 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
 
         // Store duration for later use
         setDuration(params.duration)
+          location: params.placeName || initialState.location,
+          coordinates: params.coordinates || initialState.coordinates,
+          pollingInterval: simulation.pollingInterval, // Keep current polling interval
+        })
+
+        // Reset refs
+        isInitializedRef.current = true
+        isPausedRef.current = false
+
+        // Store duration for later use
+        setDuration(params.duration)
 
         // Initialize simulation with backend
         const response = await initializeSimulation({
+          placeName: params.placeName || initialState.location,
+          coordinates: params.coordinates || initialState.coordinates,
           placeName: params.placeName || initialState.location,
           coordinates: params.coordinates || initialState.coordinates,
           numberOfAgents: params.numberOfAgents,
@@ -210,6 +224,13 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
         if (isPausedRef.current) {
           return
         }
+    // Set up interval to fetch steps
+    stepInterval.current = setInterval(async () => {
+      try {
+        // If paused, don't fetch new steps
+        if (isPausedRef.current) {
+          return
+        }
 
         const stepData = await getNextStep()
 
@@ -254,10 +275,12 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
 
   const fetchNextStep = useCallback(async (): Promise<StepResponse | null> => {
     if (simulation.status !== "running") {
+    if (simulation.status !== "running") {
       return null
     }
 
     try {
+      const stepData = await getNextStep()
       const stepData = await getNextStep()
 
       // Check if there's an error
@@ -353,6 +376,7 @@ export function SimulationProvider({ children }: { children: React.ReactNode }) 
       }))
 
       // If there's an active interval, restart it with the new polling rate
+      if (stepInterval.current && !isPausedRef.current) {
       if (stepInterval.current && !isPausedRef.current) {
         clearInterval(stepInterval.current)
         startFetchingSteps()

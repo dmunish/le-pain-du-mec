@@ -1,12 +1,15 @@
 export type SimulationStatus = "not_started" | "initializing" | "running" | "paused" | "completed" | "error"
 
 export interface SimulationParameters {
+  // Location parameters
   placeName: string
   coordinates: [number, number] // Keep for frontend use
   numberOfAgents: number
   infectionProbability: number
   distanceThreshold: number
   duration: number
+
+  // Disease parameters
   latentPeriod: number
   recoveryPeriod: number
   deathRate: number
