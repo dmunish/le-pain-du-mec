@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --radius: 1rem;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  height: 100%;
+}
+
+body {
+  background-color: #262626;
+  color: #ffffff;
+  background-image: radial-gradient(circle at 50% 50%, rgba(245, 110, 15, 0.15), rgba(38, 38, 38, 0) 70%);
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.glass {
+  background: rgba(38, 38, 38, 0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-dark {
+  background: rgba(20, 20, 20, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-light {
+  background: rgba(75, 96, 127, 0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.orange-glow {
+  position: relative;
+}
+
+.orange-glow::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(circle at center, rgba(245, 110, 15, 0.3), transparent 70%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.map-container {
+  height: 100%;
+  width: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.mapboxgl-canvas {
+  border-radius: var(--radius);
+}
+
+.chart-container {
+  width: 100%;
+  height: 100%;
+}
+
+.animate-icon {
+  transition: all 0.3s ease;
+}
+
+.animate-icon:hover {
+  transform: scale(1.1);
+  color: #f56e0f;
+}
+
+.glow-border {
+  box-shadow: 0 0 15px rgba(245, 110, 15, 0.5);
+}
+
+.glow-text {
+  text-shadow: 0 0 10px rgba(245, 110, 15, 0.7);
+}
+
+.gradient-text {
+  background: linear-gradient(90deg, #f56e0f, #4b607f);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}
+
+.divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #878787, transparent);
+}
+
+/* Animation for the logo */
+@keyframes float {
+  0% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+  100% {
+    transform: translateY(0px);
+  }
+}
+
+.float-animation {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Scroll transition for home page */
+.scroll-container {
+  height: 100vh;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+}
+
+.scroll-section {
+  height: 100vh;
+  scroll-snap-align: start;
+  position: relative;
+}
+
+/* Agent styles */
+.agent {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: absolute;
+  transition: all 0.5s ease;
+}
+
+.agent-healthy {
+  background-color: #4b607f;
+}
+
+.agent-infected {
+  background-color: #f56e0f;
+}
+
+.agent-recovered {
+  background-color: #878787;
+}
+
+/* Progress bar animation */
+@keyframes progress {
+  0% {
+    width: 0%;
+  }
+  100% {
+    width: 100%;
+  }
+}
+
+.progress-bar {
+  height: 4px;
+  background: linear-gradient(90deg, #f56e0f, #4b607f);
+  animation: progress 3s ease-in-out;
+}
+
+/* Tooltip styles */
+.tooltip {
+  position: absolute;
+  background: rgba(20, 20, 20, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  z-index: 1000;
+  pointer-events: none;
+  max-width: 200px;
+}
+
+/* Search bar transition */
+.search-reveal {
+  transform: translateY(0);
+  opacity: 1;
+  transition: all 0.5s ease;
+}
+
+.search-hidden {
+  transform: translateY(-20px);
+  opacity: 0;
+  transition: all 0.5s ease;
+}
+
+/* Hero section styles */
+.hero-title {
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.hero-description {
+  font-weight: 400;
+  line-height: 1.6;
+  opacity: 0.9;
+}
+
+/* Simulation status card */
+.simulation-status-card {
+  transition: all 0.3s ease;
+}
+
+.simulation-status-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 15px 30px rgba(0, 0, 0, 0.2);
+}
+
+/* Chart styles */
+.chart-card {
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+.chart-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+}
+
+.chart-title {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 1rem;
+}
+
+.chart-container canvas {
+  border-radius: 8px;
+}
+
+/* Status buttons */
+.status-button {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.status-button:hover {
+  transform: translateY(-1px);
+}
+
+.status-button.active {
+  font-weight: 600;
+}
